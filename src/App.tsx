@@ -68,18 +68,17 @@ function App() {
       && (!hideFull || server.players < server.maxPlayers)
       && (!hideEmpty || server.players > 0)
       && (!secureOnly || server.vac)
-      && server.ping <= maxPing;
+      && (maxPing >= 2500 || (server.ping !== null && server.ping <= maxPing));
   }).sort((left, right) => {
-    if (serverSort === 'ping') return left.ping - right.ping;
+    if (serverSort === 'ping') return (left.ping ?? Number.MAX_SAFE_INTEGER) - (right.ping ?? Number.MAX_SAFE_INTEGER);
     if (serverSort === 'name') return left.name.localeCompare(right.name);
     if (serverSort === 'map') return left.map.localeCompare(right.map) || right.players - left.players;
-    return right.players - left.players || left.ping - right.ping;
+    return right.players - left.players || (left.ping ?? Number.MAX_SAFE_INTEGER) - (right.ping ?? Number.MAX_SAFE_INTEGER);
   }), [hideEmpty, hideFull, maxPing, secureOnly, serverMap, serverResults, serverSearch, serverSort]);
   const selectedServer = serverResults.find((server) => server.address === selectedServerAddress);
   const serverMaps = [...new Set(serverResults.map((server) => server.map).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const typicalPing = serverResults.length
-    ? [...serverResults].sort((a, b) => a.ping - b.ping)[Math.floor(serverResults.length / 2)].ping
-    : 0;
+  const measuredPings = serverResults.flatMap((server) => server.ping === null ? [] : [server.ping]).sort((a, b) => a - b);
+  const typicalPing = measuredPings.length ? measuredPings[Math.floor(measuredPings.length / 2)] : null;
 
   async function refresh() {
     setWorking(true);
@@ -330,12 +329,12 @@ function App() {
         </div>}
 
         {page === 'servers' && <div className="page-content server-browser-page">
-          <div className="page-title-row server-title-row"><div><div className="eyebrow"><span className="live-pip" /> DAYZ PUBLIC SERVER FEED</div><h1>Server browser<span>.</span></h1><p>Live status, player counts, ping, security and quick join.</p></div><button className="primary-action" onClick={() => setShowAddServer((current) => !current)}><Plus size={16} /> ADD SERVER</button></div>
+          <div className="page-title-row server-title-row"><div><div className="eyebrow"><span className="live-pip" /> DAYZ SERVER DIRECTORY</div><h1>Server browser<span>.</span></h1><p>Official and community listings, server details and quick join.</p></div><button className="primary-action" onClick={() => setShowAddServer((current) => !current)}><Plus size={16} /> ADD SERVER</button></div>
 
           <div className="server-metrics">
             <div><span>VISIBLE SERVERS</span><strong>{visibleServers.length.toLocaleString()}</strong><small>{serverLoading && serverProgress.total ? `SCANNING ${serverProgress.complete.toLocaleString()} / ${serverProgress.total.toLocaleString()}` : 'MATCHING CURRENT FILTERS'}</small></div>
-            <div><span>LIVE RESULTS</span><strong>{serverResults.length.toLocaleString()}</strong><small>{serverScope === 'internet' ? 'STEAM MASTER LIST' : serverScope === 'favorites' ? 'SAVED FAVORITES' : 'RECENT CONNECTIONS'}</small></div>
-            <div><span>MEDIAN PING</span><strong>{serverResults.length ? `${typicalPing} <i>MS</i>` : '--'}</strong><small>RESPONDING SERVERS</small></div>
+            <div><span>SERVER RESULTS</span><strong>{serverResults.length.toLocaleString()}</strong><small>{serverScope === 'internet' ? 'INTERNET DIRECTORY' : serverScope === 'favorites' ? 'SAVED FAVORITES' : 'RECENT CONNECTIONS'}</small></div>
+            <div><span>MEDIAN PING</span><strong>{typicalPing !== null ? `${typicalPing} <i>MS</i>` : '--'}</strong><small>RESPONDING SERVERS</small></div>
             <div><span>FAVORITES</span><strong>{serverFavorites.length.toString().padStart(2, '0')}</strong><small>STORED ON THIS PC</small></div>
           </div>
 
@@ -373,21 +372,21 @@ function App() {
                   return <div key={server.address} role="button" tabIndex={0} className={`server-row ${selected ? 'selected' : ''}`} onClick={() => setSelectedServerAddress(server.address)} onKeyDown={(event) => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); setSelectedServerAddress(server.address); } }} onDoubleClick={() => void joinServer(server)}>
                     <div className="server-primary"><div className="server-name-line"><span className="server-online-dot" /><strong title={server.name}>{server.name}</strong>{server.password && <span title="Password protected"><LockKeyhole size={12} /></span>}</div><div className="server-subline"><span>{server.map || 'Unknown map'}</span><i>·</i><span>{server.address}</span>{server.vac && <b>VAC</b>}</div></div>
                     <div className="server-player-cell"><strong>{server.players}<i> / {server.maxPlayers}</i></strong><span className="server-player-meter"><span style={{ width: `${fullness}%` }} /></span></div>
-                    <span className={`server-ping ${server.ping < 100 ? 'fast' : server.ping < 180 ? 'medium' : 'slow'}`}>{server.ping}<i>ms</i></span>
+                    <span className={`server-ping ${server.ping === null ? '' : server.ping < 100 ? 'fast' : server.ping < 180 ? 'medium' : 'slow'}`}>{server.ping === null ? '—' : <>{server.ping}<i>ms</i></>}</span>
                     <button className={`server-row-fav ${favorite ? 'is-favorite' : ''}`} onClick={(event) => { event.stopPropagation(); void toggleFavorite(server); }} aria-label={favorite ? `Remove ${server.name} from favorites` : `Add ${server.name} to favorites`} title={favorite ? 'Remove favorite' : 'Add favorite'}><Star size={15} fill={favorite ? 'currentColor' : 'none'} /></button>
                   </div>;
                 })}
-                {!visibleServers.length && <div className="server-empty-state">{serverLoading ? <><LoaderCircle size={24} className="spin" /><strong>{serverProgress.total ? 'Querying DayZ servers' : 'Contacting Steam master server'}</strong><span>{serverProgress.total ? `${serverProgress.complete.toLocaleString()} of ${serverProgress.total.toLocaleString()} checked` : 'Building the live server list'}</span></> : <><ServerIcon size={25} /><strong>{serverScope === 'favorites' && !serverFavorites.length ? 'No favorites saved' : serverScope === 'history' ? 'No recent connections' : 'No servers match these filters'}</strong><span>{serverError ? 'Discovery is unavailable. You can still add a server by address.' : serverScope === 'favorites' && !serverFavorites.length ? 'Star any server or add one by address.' : serverResults.length ? 'Relax a filter or try another search.' : 'Check your connection or add a server by address.'}</span>{serverScope === 'internet' && !serverResults.length && <button onClick={() => setShowAddServer(true)}>ADD SERVER BY ADDRESS</button>}</>}</div>}
+                {!visibleServers.length && <div className="server-empty-state">{serverLoading ? <><LoaderCircle size={24} className="spin" /><strong>{serverProgress.total ? 'Querying DayZ servers' : 'Downloading server directory'}</strong><span>{serverProgress.total ? `${serverProgress.complete.toLocaleString()} of ${serverProgress.total.toLocaleString()} checked` : 'Building the live server list'}</span></> : <><ServerIcon size={25} /><strong>{serverScope === 'favorites' && !serverFavorites.length ? 'No favorites saved' : serverScope === 'history' ? 'No recent connections' : 'No servers match these filters'}</strong><span>{serverError ? 'Discovery is unavailable. You can still add a server by address.' : serverScope === 'favorites' && !serverFavorites.length ? 'Star any server or add one by address.' : serverResults.length ? 'Relax a filter or try another search.' : 'Check your connection or add a server by address.'}</span>{serverScope === 'internet' && !serverResults.length && <button onClick={() => setShowAddServer(true)}>ADD SERVER BY ADDRESS</button>}</>}</div>}
               </div>
-              <div className="server-list-foot"><span>{serverLoading ? 'LIVE QUERY IN PROGRESS' : 'DOUBLE-CLICK A SERVER TO JOIN'}</span><span>DAYZ STANDALONE <i>·</i> {serverResults.length.toLocaleString()} QUERIED</span></div>
+              <div className="server-list-foot"><span>{serverLoading ? 'LIVE QUERY IN PROGRESS' : 'DOUBLE-CLICK A SERVER TO JOIN'}</span><span>DAYZ STANDALONE <i>·</i> {serverResults.length.toLocaleString()} LISTED</span></div>
             </section>
 
             <aside className="server-detail-panel">
               {selectedServer ? <>
                 <div className="server-detail-cover"><span className="detail-map-mark"><MapIcon size={23} /></span><span>DAYZ / {selectedServer.map.toUpperCase() || 'UNKNOWN'}</span><button title={serverFavorites.includes(selectedServer.address) ? 'Remove favorite' : 'Add favorite'} onClick={() => void toggleFavorite(selectedServer)}><Star size={16} fill={serverFavorites.includes(selectedServer.address) ? 'currentColor' : 'none'} /></button></div>
-                <div className="server-detail-body"><div className="server-detail-status"><span className="server-online-dot" /> RESPONDING <span>·</span> {selectedServer.ping} MS</div><h2>{selectedServer.name}</h2><div className="detail-address"><span>{selectedServer.address}</span><button title="Copy address" onClick={() => void copyServerAddress(selectedServer)}><Copy size={14} /></button></div>
+                <div className="server-detail-body"><div className="server-detail-status"><span className="server-online-dot" /> {selectedServer.ping === null ? 'DIRECTORY LISTING' : 'RESPONDING'} <span>·</span> {selectedServer.ping === null ? 'PING NOT MEASURED' : selectedServer.ping + ' MS'}</div><h2>{selectedServer.name}</h2><div className="detail-address"><span>{selectedServer.address}</span><button title="Copy address" onClick={() => void copyServerAddress(selectedServer)}><Copy size={14} /></button></div>
                   <div className="detail-player-summary"><Users size={16} /><strong>{selectedServer.players}<i> / {selectedServer.maxPlayers}</i></strong><span>PLAYERS</span></div>
-                  <div className="detail-facts"><div><span>MAP</span><strong>{selectedServer.map || 'Unknown'}</strong></div><div><span>GAME PORT</span><strong>{selectedServer.gamePort}</strong></div><div><span>VERSION</span><strong>{selectedServer.version || 'Unknown'}</strong></div><div><span>ANTI-CHEAT</span><strong className={selectedServer.vac ? 'fact-good' : ''}>{selectedServer.vac ? 'VAC SECURE' : 'NOT ADVERTISED'}</strong></div><div><span>PASSWORD</span><strong>{selectedServer.password ? 'REQUIRED' : 'NONE'}</strong></div><div><span>QUERY PING</span><strong>{selectedServer.ping} MS</strong></div></div>
+                  <div className="detail-facts"><div><span>MAP</span><strong>{selectedServer.map || 'Unknown'}</strong></div><div><span>GAME PORT</span><strong>{selectedServer.gamePort}</strong></div><div><span>VERSION</span><strong>{selectedServer.version || 'Unknown'}</strong></div><div><span>ANTI-CHEAT</span><strong className={selectedServer.vac ? 'fact-good' : ''}>{selectedServer.vac ? 'VAC SECURE' : 'NOT ADVERTISED'}</strong></div><div><span>PASSWORD</span><strong>{selectedServer.password ? 'REQUIRED' : 'NONE'}</strong></div><div><span>QUERY PING</span><strong>{selectedServer.ping === null ? 'NOT MEASURED' : selectedServer.ping + ' MS'}</strong></div></div>
                   {selectedServer.tags.length > 0 && <div className="server-tags">{selectedServer.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}</div>}
                   <div className="join-mod-note"><Gamepad2 size={15} /><span>Joining with <strong>{enabledMods.length} active profile mods</strong>. Server-required mods are not yet advertised by the query protocol.</span></div>
                   <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || serverLoading}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>

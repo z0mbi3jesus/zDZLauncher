@@ -1,6 +1,26 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildMasterRequest, parseInfo, parseMasterResponse, parseServerAddress, queryAddressCandidates } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { buildMasterRequest, getSteamMasterEndpoints, parseInfo, parseMasterResponse, parseServerAddress, parseServerList, queryAddressCandidates } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+
+test('imports HTTPS directory snapshots without inventing local ping or response time', () => {
+  const row = { game: 'dayz', endpoint: { ip: '203.0.113.7', port: 27016 }, gamePort: 2302, name: 'Community server', players: 12, maxPlayers: 60, password: true, vac: true };
+  const servers = parseServerList({ status: 0, result: [row, row, { ...row, gamePort: 70000 }, null] });
+  assert.equal(servers.length, 1);
+  assert.equal(servers[0].address, '203.0.113.7:27016');
+  assert.equal(servers[0].gamePort, 2302);
+  assert.equal(servers[0].password, true);
+  assert.equal(servers[0].ping, null);
+  assert.equal(servers[0].lastSeen, 0);
+  assert.throws(() => parseServerList({ result: [] }), /no usable/);
+  assert.throws(() => parseServerList({ error: 'unavailable' }), /unexpected/);
+});
+
+test('uses the Valve master server on port 27011 with hostname and IP fallbacks', () => {
+  const endpoints = getSteamMasterEndpoints();
+  assert.deepEqual(endpoints[0], { host: 'hl2master.steampowered.com', port: 27011 });
+  assert.ok(endpoints.every((endpoint) => endpoint.port === 27011));
+  assert.ok(endpoints.some((endpoint) => endpoint.host === '208.64.200.65'));
+});
 
 test('parses IPv4 and hostname query addresses and rejects invalid ports', () => {
   assert.deepEqual(parseServerAddress('play.example.net:27016'), {
@@ -29,6 +49,8 @@ test('parses Steam master-server IPv4 and query-port records', () => {
   const result = parseMasterResponse(packet);
   assert.deepEqual(result.servers, [{ host: '203.0.113.7', port: 27016 }]);
   assert.equal(result.cursor, '203.0.113.7:27016');
+  assert.equal(result.done, true);
+  assert.equal(parseMasterResponse(packet.subarray(0, -6)).done, false);
 });
 
 test('parses DayZ A2S_INFO metadata including game port and keywords', () => {
@@ -54,6 +76,8 @@ test('parses DayZ A2S_INFO metadata including game port and keywords', () => {
   assert.equal(server.maxPlayers, 60);
   assert.equal(server.gamePort, 2302);
   assert.equal(server.ping, 42);
+  assert.equal(server.password, false);
+  assert.equal(server.vac, true);
   assert.deepEqual(server.tags, ['official', 'firstperson']);
 });
 

@@ -16,7 +16,7 @@ export interface DayZServer {
   vac: boolean;
   version: string;
   tags: string[];
-  ping: number;
+  ping: number | null;
   lastSeen: number;
 }
 
@@ -28,11 +28,57 @@ export interface ServerScanProgress {
 
 export type ServerLog = (level: 'INFO' | 'WARN' | 'ERROR', message: string, details?: unknown) => void;
 
-const MASTER_ENDPOINTS = [{ host: '208.64.200.65', port: 27015 }];
+export const MASTER_ENDPOINTS = [
+  { host: 'hl2master.steampowered.com', port: 27011 },
+  { host: '208.64.200.65', port: 27011 },
+  { host: '208.64.200.66', port: 27011 },
+];
+
+export function getSteamMasterEndpoints(): Array<{ host: string; port: number }> {
+  return MASTER_ENDPOINTS.map((endpoint) => ({ ...endpoint }));
+}
+
 const QUERY_TIMEOUT_MS = 1400;
-const MAX_SERVER_COUNT = 3000;
 const QUERY_CONCURRENCY = 48;
 const FIRST_MASTER_CURSOR = '0.0.0.0:0';
+const DZSA_SERVER_LIST_URL = 'https://dayzsalauncher.com/api/v1/launcher/servers/dayz';
+
+export function parseServerList(payload: unknown): DayZServer[] {
+  if (!payload || typeof payload !== 'object' || !('result' in payload) || !Array.isArray(payload.result)) {
+    throw new Error('The server-list service returned an unexpected response.');
+  }
+  const servers = new Map<string, DayZServer>();
+  for (const row of payload.result) {
+    try {
+      if (!row || typeof row !== 'object' || row.game !== 'dayz' || typeof row.endpoint?.ip !== 'string') continue;
+      const { host, port, address } = parseServerAddress(`${row.endpoint.ip}:${row.endpoint.port}`);
+      if (!Number.isInteger(row.gamePort) || row.gamePort < 1 || row.gamePort > 65535) continue;
+      if (typeof row.name !== 'string' || !Number.isInteger(row.players) || row.players < 0 || !Number.isInteger(row.maxPlayers) || row.maxPlayers < 0) continue;
+      servers.set(address, {
+        address, host, queryPort: port, gamePort: row.gamePort,
+        name: row.name, map: typeof row.map === 'string' ? row.map : '', game: 'DayZ',
+        players: row.players, maxPlayers: row.maxPlayers, bots: 0,
+        password: row.password === true, vac: row.vac === true,
+        version: typeof row.version === 'string' ? row.version : '',
+        tags: [row.shard === 'public' ? 'public hive' : row.shard === 'private' ? 'private hive' : '', row.firstPersonOnly === true ? 'firstperson' : ''].filter(Boolean),
+        ping: null, lastSeen: 0, // Provider snapshot; not a local response or measured timestamp.
+      });
+    } catch {
+      // Ignore malformed entries without losing the rest of the directory.
+    }
+  }
+  if (!servers.size) throw new Error('The server-list service returned no usable DayZ servers.');
+  return [...servers.values()];
+}
+
+export async function downloadServerList(writeLog: ServerLog = () => undefined): Promise<DayZServer[]> {
+  writeLog('INFO', 'Downloading DZSA server directory over HTTPS.');
+  const response = await fetch(DZSA_SERVER_LIST_URL, { signal: AbortSignal.timeout(20000) });
+  if (!response.ok) throw new Error(`The server-list service returned HTTP ${response.status}.`);
+  const servers = parseServerList(await response.json());
+  writeLog('INFO', 'DZSA server directory downloaded.', { count: servers.length });
+  return servers;
+}
 
 function formatAddress(host: string, port: number): string {
   return host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
@@ -60,7 +106,7 @@ export function parseInfo(packet: Buffer, host: string, queryPort: number, ping:
   const players = packet.readUInt8(cursor.offset++);
   const maxPlayers = packet.readUInt8(cursor.offset++);
   const bots = packet.readUInt8(cursor.offset++);
-  cursor.offset += 3;
+  cursor.offset += 2; // Server type and environment precede visibility and VAC.
   const password = packet.readUInt8(cursor.offset++) !== 0;
   const vac = packet.readUInt8(cursor.offset++) !== 0;
   const version = nullTerminatedString(packet, cursor);
@@ -159,7 +205,7 @@ export function buildMasterRequest(cursor: string, filter: string): Buffer {
   ]);
 }
 
-export function parseMasterResponse(packet: Buffer): { servers: Array<{ host: string; port: number }>; cursor?: string } {
+export function parseMasterResponse(packet: Buffer): { servers: Array<{ host: string; port: number }>; cursor?: string; done: boolean } {
   const header = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x66, 0x0a]);
   if (packet.length < header.length || !packet.subarray(0, header.length).equals(header)) {
     throw new Error('Steam returned an unexpected master-server response.');
@@ -167,16 +213,20 @@ export function parseMasterResponse(packet: Buffer): { servers: Array<{ host: st
   let offset = header.length;
   const servers: Array<{ host: string; port: number }> = [];
   let cursor: string | undefined;
+  let done = false;
   while (offset + 6 <= packet.length) {
     const entry = packet.subarray(offset, offset + 6);
     offset += 6;
     const host = `${entry[0]}.${entry[1]}.${entry[2]}.${entry[3]}`;
     const port = entry.readUInt16BE(4);
-    if (host === '0.0.0.0' && port === 0) break;
+    if (host === '0.0.0.0' && port === 0) {
+      done = true;
+      break;
+    }
     cursor = `${host}:${port}`;
     servers.push({ host, port });
   }
-  return { servers, cursor };
+  return { servers, cursor, done };
 }
 
 async function masterPage(host: string, port: number, cursor: string): Promise<Buffer> {
@@ -185,15 +235,18 @@ async function masterPage(host: string, port: number, cursor: string): Promise<B
 }
 
 export async function discoverAddresses(writeLog: ServerLog = () => undefined): Promise<Array<{ host: string; port: number }>> {
-  for (const endpoint of MASTER_ENDPOINTS) {
+  for (const endpoint of getSteamMasterEndpoints()) {
     writeLog('INFO', 'Querying Steam Source master endpoint.', endpoint);
     try {
       const servers: Array<{ host: string; port: number }> = [];
       const seen = new Set<string>();
       let cursor = FIRST_MASTER_CURSOR;
-      while (servers.length < MAX_SERVER_COUNT) {
+      const cursors = new Set<string>();
+      while (true) {
+        if (cursors.has(cursor)) throw new Error('Steam master pagination repeated a cursor before completing.');
+        cursors.add(cursor);
         const page = parseMasterResponse(await masterPage(endpoint.host, endpoint.port, cursor));
-        if (!page.servers.length) break;
+        if (!page.servers.length && !page.done) throw new Error('Steam returned an incomplete master-server page.');
         for (const server of page.servers) {
           const key = `${server.host}:${server.port}`;
           if (!seen.has(key)) {
@@ -201,7 +254,8 @@ export async function discoverAddresses(writeLog: ServerLog = () => undefined): 
             servers.push(server);
           }
         }
-        if (!page.cursor || page.cursor === cursor) break;
+        if (page.done) break;
+        if (!page.cursor) throw new Error('Steam master response has no continuation cursor.');
         cursor = page.cursor;
       }
       writeLog('INFO', 'Steam master query completed.', { count: servers.length });
@@ -211,7 +265,8 @@ export async function discoverAddresses(writeLog: ServerLog = () => undefined): 
       continue;
     }
   }
-  const message = 'Could not reach Steam server discovery at 208.64.200.65:27015 over UDP. Check that your firewall or router allows outbound UDP, then retry; direct server addresses are still available.';
+  const endpoints = getSteamMasterEndpoints().map((endpoint) => `${endpoint.host}:${endpoint.port}`).join(', ');
+  const message = `Could not reach Steam server discovery at ${endpoints} over UDP. Check that your firewall or router allows outbound UDP, then retry; direct server addresses are still available.`;
   writeLog('ERROR', message);
   throw new Error(message);
 }
@@ -263,10 +318,19 @@ export async function scanServers(
   writeLog: ServerLog = () => undefined,
 ): Promise<DayZServer[]> {
   writeLog('INFO', 'Starting server scan.', { scope, savedCount: savedAddresses.length });
+  if (scope === 'internet') {
+    try {
+      const servers = (await downloadServerList(writeLog)).sort((left, right) => right.players - left.players);
+      onProgress({ total: servers.length, complete: servers.length, servers });
+      return servers;
+    } catch (error) {
+      writeLog('WARN', 'HTTPS directory unavailable; trying Steam UDP discovery.', error);
+    }
+  }
   const addresses = scope === 'internet'
     ? await discoverAddresses(writeLog)
     : savedAddresses.map((address) => parseServerAddress(address));
-  const candidates = addresses.slice(0, MAX_SERVER_COUNT);
+  const candidates = addresses;
   const found: DayZServer[] = [];
   const recentOrder = new Map(candidates.map((server, index) => [formatAddress(server.host, server.port), index]));
   const sortResults = (servers: DayZServer[]) => scope === 'history'

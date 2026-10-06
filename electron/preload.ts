@@ -28,7 +28,7 @@ export interface DayZServer {
   vac: boolean;
   version: string;
   tags: string[];
-  ping: number;
+  ping: number | null;
   lastSeen: number;
 }
 
