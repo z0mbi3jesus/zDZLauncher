@@ -14,6 +14,7 @@ declare global {
       toggleServerFavorite: (address: string) => Promise<string[]>;
       addServer: (address: string) => Promise<DayZServer[]>;
       searchServers: (id: string, scope: ServerScope) => Promise<DayZServer[]>;
+      cancelServerSearch: (id: string) => Promise<void>;
       onServerProgress: (listener: (progress: ServerScanProgress) => void) => () => void;
       joinServer: (server: DayZServer, modIds: string[], password?: string) => Promise<boolean>;
     };

@@ -1,7 +1,7 @@
 import { createSocket, type RemoteInfo } from 'node:dgram';
 import { lookup } from 'node:dns/promises';
 import { createPublicKey, verify, type KeyObject } from 'node:crypto';
-import { discoverSteamServers, serverCategory } from './steam-discovery.js';
+import { discoverSteamServers, isOfficialCandidate, serverCategory } from './steam-discovery.js';
 export { closeSteamDiscovery, parseSteamServer } from './steam-discovery.js';
 
 export interface DayZServer {
@@ -57,7 +57,7 @@ export function parseInfo(packet: Buffer, host: string, queryPort: number, ping:
   const map = nullTerminatedString(packet, cursor);
   const folder = nullTerminatedString(packet, cursor);
   const game = nullTerminatedString(packet, cursor);
-    cursor.offset += 2; // Skip the appId as it's not needed
+  cursor.offset += 2; // Skip the appId as it's not needed.
   const players = packet.readUInt8(cursor.offset++);
   const maxPlayers = packet.readUInt8(cursor.offset++);
   const bots = packet.readUInt8(cursor.offset++);
@@ -65,7 +65,7 @@ export function parseInfo(packet: Buffer, host: string, queryPort: number, ping:
   const password = packet.readUInt8(cursor.offset++) !== 0;
   const vac = packet.readUInt8(cursor.offset++) !== 0;
   const version = nullTerminatedString(packet, cursor);
-    if (!/dayz/i.test(folder) && !/dayz/i.test(game)) throw new Error('Query response is not a DayZ server.');
+  if (!/dayz/i.test(folder) && !/dayz/i.test(game)) throw new Error('Query response is not a DayZ server.');
   let gamePort = queryPort;
   let keywords: string[] = [];
 
@@ -257,13 +257,15 @@ async function bohemiaPublicKey(writeLog: ServerLog): Promise<KeyObject | undefi
   return publicKey;
 }
 
-async function verifyOfficialCandidates(servers: DayZServer[], progress: (value: ServerScanProgress) => void, writeLog: ServerLog) {
-  const candidates = servers.filter((server) => server.tags.some((tag) => /^shard0\d{2}$/i.test(tag)));
+async function verifyOfficialCandidates(servers: DayZServer[], progress: (value: ServerScanProgress) => void, writeLog: ServerLog, signal?: AbortSignal) {
+  if (signal?.aborted) return;
+  const candidates = servers.filter((server) => isOfficialCandidate(server.tags));
   if (!candidates.length) return;
   const key = await bohemiaPublicKey(writeLog);
   if (!key) return;
   let verified = 0;
   await mapLimit(candidates, 12, async (server) => {
+    if (signal?.aborted) return;
     const cacheId = JSON.stringify([server.host, server.queryPort, server.gamePort, server.name]);
     if (Date.now() - (verifiedServers.get(cacheId) ?? 0) < 600000) {
       server.category = 'official';
@@ -283,16 +285,17 @@ async function verifyOfficialCandidates(servers: DayZServer[], progress: (value:
     }
   }, (_result, complete) => {
     if (complete % 12 === 0 || complete === candidates.length) progress({ total: servers.length, complete: servers.length, servers: [...servers] });
-  });
+  }, signal);
   writeLog('INFO', 'Bohemia official-server verification finished.', { candidates: candidates.length, verified, unverified: candidates.length - verified });
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>, completed: (result: R | undefined, count: number, error: unknown | undefined, item: T) => void): Promise<R[]> {
+async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>, completed: (result: R | undefined, count: number, error: unknown | undefined, item: T) => void, signal?: AbortSignal): Promise<R[]> {
   const output: R[] = [];
   let nextIndex = 0;
   let complete = 0;
   async function run() {
     while (true) {
+      if (signal?.aborted) return;
       const index = nextIndex++;
       if (index >= items.length) return;
       try {
@@ -316,11 +319,12 @@ export async function scanServers(
   onProgress: (progress: ServerScanProgress) => void,
   writeLog: ServerLog = () => undefined,
   gameExecutable = '',
+  signal?: AbortSignal,
 ): Promise<DayZServer[]> {
   writeLog('INFO', 'Starting server scan.', { scope, savedCount: savedAddresses.length });
   if (scope === 'internet') {
-    const servers = await discoverSteamServers(gameExecutable, onProgress, writeLog);
-    await verifyOfficialCandidates(servers, onProgress, writeLog);
+    const servers = await discoverSteamServers(gameExecutable, onProgress, writeLog, signal);
+    await verifyOfficialCandidates(servers, onProgress, writeLog, signal);
     return servers.sort((left, right) => right.players - left.players);
   }
   const addresses = savedAddresses.map((address) => parseServerAddress(address));
@@ -346,8 +350,8 @@ export async function scanServers(
       lastLoggedProgress = complete;
       writeLog('INFO', 'Server scan progress.', { complete, total: candidates.length, online: found.length, failed: failures });
     }
-  });
+  }, signal);
   writeLog('INFO', 'Server scan finished.', { queried: candidates.length, online: found.length, failed: failures });
-  await verifyOfficialCandidates(found, onProgress, writeLog);
+  await verifyOfficialCandidates(found, onProgress, writeLog, signal);
   return sortResults(found);
 }

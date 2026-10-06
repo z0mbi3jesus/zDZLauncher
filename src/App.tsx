@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDown, ArrowUp, Check, ChevronDown, CircleHelp, Copy, Download, Filter,
   FolderOpen, Gamepad2, Globe2, Heart, History, LayoutDashboard, ListFilter, LoaderCircle,
@@ -53,6 +53,11 @@ function App() {
   const [secureOnly, setSecureOnly] = useState(false);
   const [maxPing, setMaxPing] = useState(2500);
   const activeServerScan = useRef('');
+  const serverCache = useRef<Partial<Record<ServerScope, DayZServer[]>>>({});
+  const activeServerScope = useRef<ServerScope>('internet');
+  const [serverScrollTop, setServerScrollTop] = useState(0);
+  const serverRowsRef = useRef<HTMLDivElement>(null);
+  const deferredServerSearch = useDeferredValue(serverSearch);
 
   const profile = profiles.find((item) => item.id === activeProfile) ?? profiles[0];
   const enabledMods = mods.filter((mod) => mod.enabled);
@@ -63,7 +68,7 @@ function App() {
   }), [filter, mods, query]);
 
   const visibleServers = useMemo(() => serverResults.filter((server) => {
-    const matchesSearch = `${server.name} ${server.map} ${server.address} ${server.tags.join(' ')}`.toLowerCase().includes(serverSearch.toLowerCase());
+    const matchesSearch = `${server.name} ${server.map} ${server.address} ${server.tags.join(' ')}`.toLowerCase().includes(deferredServerSearch.toLowerCase());
     return matchesSearch
       && (serverCategory === 'all' || server.category === serverCategory)
       && (serverMap === 'all' || server.map.toLowerCase() === serverMap.toLowerCase())
@@ -76,11 +81,20 @@ function App() {
     if (serverSort === 'name') return left.name.localeCompare(right.name);
     if (serverSort === 'map') return left.map.localeCompare(right.map) || right.players - left.players;
     return right.players - left.players || (left.ping ?? Number.MAX_SAFE_INTEGER) - (right.ping ?? Number.MAX_SAFE_INTEGER);
-  }), [hideEmpty, hideFull, maxPing, secureOnly, serverMap, serverCategory, serverResults, serverSearch, serverSort]);
+  }), [hideEmpty, hideFull, maxPing, secureOnly, serverMap, serverCategory, serverResults, deferredServerSearch, serverSort]);
+  const firstVisibleRow = Math.max(0, Math.min(Math.floor(serverScrollTop / 61) - 5, visibleServers.length - 30));
+  const renderedServers = visibleServers.slice(firstVisibleRow, firstVisibleRow + 30);
   const selectedServer = serverResults.find((server) => server.address === selectedServerAddress);
-  const serverMaps = [...new Set(serverResults.map((server) => server.map).filter(Boolean))].sort((a, b) => a.localeCompare(b));
-  const measuredPings = serverResults.flatMap((server) => server.ping === null ? [] : [server.ping]).sort((a, b) => a - b);
-  const typicalPing = measuredPings.length ? measuredPings[Math.floor(measuredPings.length / 2)] : null;
+  const serverMaps = useMemo(() => [...new Set(serverResults.map((server) => server.map).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [serverResults]);
+  const typicalPing = useMemo(() => {
+    const measured = serverResults.flatMap((server) => server.ping === null ? [] : [server.ping]).sort((a, b) => a - b);
+    return measured.length ? measured[Math.floor(measured.length / 2)] : null;
+  }, [serverResults]);
+
+  useEffect(() => {
+    setServerScrollTop(0);
+    serverRowsRef.current?.scrollTo(0, 0);
+  }, [serverScope, deferredServerSearch, serverMap, serverCategory, serverSort, hideFull, hideEmpty, secureOnly, maxPing]);
 
   async function refresh() {
     setWorking(true);
@@ -117,23 +131,28 @@ function App() {
     void window.dayz.logPath().then(setRuntimeLogPath).catch(() => undefined);
     return window.dayz.onServerProgress((progress) => {
       if (progress.id !== activeServerScan.current) return;
-      setServerResults(progress.servers);
-      setServerProgress({ complete: progress.complete, total: progress.total });
+      serverCache.current[activeServerScope.current] = progress.servers;
+      startTransition(() => {
+        setServerResults(progress.servers);
+        setServerProgress({ complete: progress.complete, total: progress.total });
+      });
       setServerError('');
     });
   }, []);
 
   async function scanServers(scope = serverScope) {
+    if (activeServerScan.current) void window.dayz.cancelServerSearch(activeServerScan.current);
     const id = crypto.randomUUID();
     activeServerScan.current = id;
+    activeServerScope.current = scope;
     setServerLoading(true);
     setServerError('');
     setServerProgress({ complete: 0, total: 0 });
-    setServerResults([]);
-    setSelectedServerAddress('');
+    setServerResults(serverCache.current[scope] ?? []);
     try {
       const results = await window.dayz.searchServers(id, scope);
       if (activeServerScan.current === id) {
+        serverCache.current[scope] = results;
         setServerResults(results);
         setServerProgress({ complete: results.length, total: results.length });
         setSelectedServerAddress((current) => results.some((server) => server.address === current) ? current : results[0]?.address ?? '');
@@ -141,17 +160,35 @@ function App() {
     } catch (error) {
       if (activeServerScan.current === id) setServerError(error instanceof Error ? error.message : 'Steam server discovery failed.');
     } finally {
-      if (activeServerScan.current === id) setServerLoading(false);
+      if (activeServerScan.current === id) {
+        activeServerScan.current = '';
+        setServerLoading(false);
+      }
     }
   }
 
   useEffect(() => {
-    if (page === 'servers') void scanServers(serverScope);
+    if (page !== 'servers') return;
+    const cached = serverCache.current[serverScope];
+    if (cached) {
+      setServerResults(cached);
+      setServerProgress({ complete: cached.length, total: cached.length });
+      setServerError('');
+    } else void scanServers(serverScope);
+    return () => {
+      const id = activeServerScan.current;
+      if (id) {
+        activeServerScan.current = '';
+        void window.dayz.cancelServerSearch(id);
+      }
+      setServerLoading(false);
+    };
   }, [page, serverScope]);
 
   async function toggleFavorite(server: DayZServer) {
     try {
       setServerFavorites(await window.dayz.toggleServerFavorite(server.address));
+      delete serverCache.current.favorites;
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not update favorites.');
     }
@@ -163,6 +200,7 @@ function App() {
     setServerError('');
     try {
       const added = await window.dayz.addServer(serverAddressInput);
+      delete serverCache.current.favorites;
       setServerFavorites(await window.dayz.serverFavorites());
       setServerResults(added);
       setSelectedServerAddress(added[0]?.address ?? '');
@@ -185,6 +223,7 @@ function App() {
     if (server.password && password === null) return;
     try {
       await window.dayz.joinServer(server, enabledMods.map((mod) => mod.id), password ?? undefined);
+      delete serverCache.current.history;
       setNotice(`Connecting to ${server.name}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not join the server.');
@@ -349,7 +388,7 @@ function App() {
               <button role="tab" aria-selected={serverScope === 'history'} className={serverScope === 'history' ? 'selected' : ''} onClick={() => setServerScope('history')}><History size={15} /> RECENT</button>
             </div>
             <label className="server-search"><Search size={15} /><input aria-label="Search servers" value={serverSearch} onChange={(event) => setServerSearch(event.target.value)} placeholder="Name, map, address, tag" /><kbd>CTRL F</kbd></label>
-            <button className="icon-button server-refresh" title="Refresh server list" onClick={() => void scanServers()} disabled={serverLoading}>{serverLoading ? <LoaderCircle size={16} className="spin" /> : <RefreshCw size={16} />}</button>
+            <button className="icon-button server-refresh" aria-label={serverLoading ? 'Stop server refresh' : 'Refresh server list'} title={serverLoading ? 'Stop server refresh' : 'Refresh server list'} onClick={() => { if (serverLoading) void window.dayz.cancelServerSearch(activeServerScan.current); else void scanServers(); }}>{serverLoading ? <X size={16} /> : <RefreshCw size={16} />}</button>
           </div>
 
           {serverError && <div className="server-error"><CircleHelp size={16} /><span>{serverError}</span><button onClick={() => void scanServers()}>RETRY</button></div>}
@@ -367,8 +406,9 @@ function App() {
           <div className="server-browser-layout">
             <section className="server-list-panel" aria-label="Server results">
               <div className="server-list-head"><span>SERVER <button onClick={() => setServerSort('name')}>NAME</button></span><button onClick={() => setServerSort('players')}>PLAYERS</button><button onClick={() => setServerSort('ping')}>PING</button><span>STAR</span></div>
-              <div className="server-rows">
-                {visibleServers.map((server) => {
+              <div className="server-rows" ref={serverRowsRef} onScroll={(event) => setServerScrollTop(event.currentTarget.scrollTop)}>
+                {!!visibleServers.length && <div aria-hidden="true" style={{ height: firstVisibleRow * 61 }} />}
+                {renderedServers.map((server) => {
                   const favorite = serverFavorites.includes(server.address);
                   const selected = selectedServerAddress === server.address;
                   const fullness = server.maxPlayers ? Math.min(100, server.players / server.maxPlayers * 100) : 0;
@@ -379,6 +419,7 @@ function App() {
                     <button className={`server-row-fav ${favorite ? 'is-favorite' : ''}`} onClick={(event) => { event.stopPropagation(); void toggleFavorite(server); }} aria-label={favorite ? `Remove ${server.name} from favorites` : `Add ${server.name} to favorites`} title={favorite ? 'Remove favorite' : 'Add favorite'}><Star size={15} fill={favorite ? 'currentColor' : 'none'} /></button>
                   </div>;
                 })}
+                {!!visibleServers.length && <div aria-hidden="true" style={{ height: Math.max(0, visibleServers.length - firstVisibleRow - renderedServers.length) * 61 }} />}
                 {!visibleServers.length && <div className="server-empty-state">{serverLoading ? <><LoaderCircle size={24} className="spin" /><strong>{serverProgress.total ? 'Querying DayZ servers' : 'Querying Steam servers'}</strong><span>{serverProgress.total ? `${serverProgress.complete.toLocaleString()} of ${serverProgress.total.toLocaleString()} checked` : 'Building the live server list'}</span></> : <><ServerIcon size={25} /><strong>{serverScope === 'favorites' && !serverFavorites.length ? 'No favorites saved' : serverScope === 'history' ? 'No recent connections' : 'No servers match these filters'}</strong><span>{serverError ? 'Discovery is unavailable. You can still add a server by address.' : serverScope === 'favorites' && !serverFavorites.length ? 'Star any server or add one by address.' : serverResults.length ? 'Relax a filter or try another search.' : 'Check your connection or add a server by address.'}</span>{serverScope === 'internet' && !serverResults.length && <button onClick={() => setShowAddServer(true)}>ADD SERVER BY ADDRESS</button>}</>}</div>}
               </div>
               <div className="server-list-foot"><span>{serverLoading ? 'LIVE QUERY IN PROGRESS' : 'DOUBLE-CLICK A SERVER TO JOIN'}</span><span>DAYZ STANDALONE <i>·</i> {serverResults.length.toLocaleString()} LISTED</span></div>

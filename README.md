@@ -36,6 +36,10 @@ npm run package
 
 The unpacked build and installer are written to the stable project-root folder `launcher-build`.
 
+Source lives in `src` (interface), `electron` (desktop integration and server discovery), and `tests`. `dist` and `dist-electron` are generated compilation inputs for packaging; `launcher-build` holds the current Windows build. These output folders and `node_modules` are ignored by Git. Typechecking does not create files in the project root.
+
+Server lists are retained for the current session when navigating between pages and sources. Use Refresh to update a list; during a refresh that button becomes Stop and retains listings already found. Leaving the server browser or switching sources cancels its scan. The list renders a small window of rows as you scroll, while search and filters apply to all loaded servers.
+
 ## First use
 
 1. Install DayZ and subscribe to mods in the DayZ Steam Workshop using Steam.

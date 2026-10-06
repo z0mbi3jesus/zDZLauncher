@@ -6,3 +6,4 @@ release-*/
 out/
 build/
 launcher-build/
+*.tsbuildinfo

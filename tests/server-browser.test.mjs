@@ -1,7 +1,16 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+
+test('a cancelled internet scan does not initialize Steam or publish results', async () => {
+  const controller = new AbortController();
+  controller.abort();
+  let updates = 0;
+  const servers = await scanServers('internet', [], () => updates++, () => {}, '', controller.signal);
+  assert.deepEqual(servers, []);
+  assert.equal(updates, 0);
+});
 
 test('decodes Steam game and query ports separately without trusting official shard claims', () => {
   const record = Buffer.alloc(364);

@@ -3,8 +3,16 @@ import { existsSync } from 'node:fs';
 import path from 'node:path';
 import type { DayZServer, ServerLog, ServerScanProgress } from './server-browser.js';
 
+const DAYZ_APP_ID = 221100;
+const REFRESH_TIMEOUT_MS = 90_000;
+const STEAM_RESULT_LIMIT = 10_000;
+
+export function isOfficialCandidate(tags: string[]): boolean {
+  return tags.some((tag) => /^shard0\d{2}$/i.test(tag));
+}
+
 export function serverCategory(tags: string[]): DayZServer['category'] {
-  if (tags.some((tag) => /^shard0\d{2}$/i.test(tag))) return 'unverified';
+  if (isOfficialCandidate(tags)) return 'unverified';
   return tags.some((tag) => /^privhive$/i.test(tag)) ? 'community' : 'unverified';
 }
 
@@ -34,8 +42,8 @@ let scanQueue: Promise<unknown> = Promise.resolve();
 function createSteam(gameExecutable: string) {
   const dllPath = path.join(path.dirname(gameExecutable), 'steam_api64.dll');
   if (!gameExecutable || !existsSync(dllPath)) throw new Error('Set the DayZ installation path in Settings to enable Steam server discovery.');
-  process.env.SteamAppId = '221100';
-  process.env.SteamGameId = '221100';
+  process.env.SteamAppId = String(DAYZ_APP_ID);
+  process.env.SteamGameId = String(DAYZ_APP_ID);
   const library = koffi.load(dllPath);
   const init = library.func('bool SteamAPI_Init()');
   if (!init()) throw new Error('Steam could not initialize. Open Steam, sign in to the account that owns DayZ, then retry.');
@@ -59,8 +67,9 @@ export function closeSteamDiscovery() {
   steam = undefined;
 }
 
-export function discoverSteamServers(gameExecutable: string, progress: (value: ServerScanProgress) => void, log: ServerLog): Promise<DayZServer[]> {
+export function discoverSteamServers(gameExecutable: string, progress: (value: ServerScanProgress) => void, log: ServerLog, signal?: AbortSignal): Promise<DayZServer[]> {
   const task = scanQueue.then(async () => {
+    if (signal?.aborted) return [];
     steam ??= createSteam(gameExecutable);
     const client = steam;
     const allocations: unknown[] = [];
@@ -75,7 +84,7 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
         allocations.push(pointer);
         return pointer;
       });
-      const handle = client.request(client.api, 221100, pointers.length ? pointers : null, pointers.length, null);
+      const handle = client.request(client.api, DAYZ_APP_ID, pointers.length ? pointers : null, pointers.length, null);
       if (!handle) throw new Error('Steam did not create a server-list request.');
       handles.push(handle);
     };
@@ -114,8 +123,8 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
           progress({ total: servers.length, complete: servers.filter((server) => server.lastSeen > 0).length, servers });
           lastProgress = Date.now();
         }
-        if (!active) break;
-        if (Date.now() - started >= 90000) {
+        if (!active || signal?.aborted) break;
+        if (Date.now() - started >= REFRESH_TIMEOUT_MS) {
           log('WARN', 'Steam refresh reached 90 seconds; retaining available listings.', { count: servers.length });
           break;
         }
@@ -123,7 +132,7 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
       }
       if (!servers.length) throw new Error('Steam returned no DayZ servers. Check Steam connectivity, then retry.');
       log('INFO', 'Steam server discovery finished.', { count: servers.length });
-      if (handles.some((handle) => client.count(client.api, handle) >= 10000)) log('WARN', 'A Steam partition reached its result limit; complete coverage is not guaranteed.');
+      if (handles.some((handle) => client.count(client.api, handle) >= STEAM_RESULT_LIMIT)) log('WARN', 'A Steam partition reached its result limit; complete coverage is not guaranteed.');
       return servers;
     } finally {
       for (const handle of handles) {

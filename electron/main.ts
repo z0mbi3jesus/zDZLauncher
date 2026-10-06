@@ -206,8 +206,21 @@ ipcMain.handle('app:log-path', () => getLogFile());
 
 ipcMain.handle('servers:favorites', () => readSettings().favoriteServers ?? []);
 
+const serverSearches = new Map<number, { id: string; controller: AbortController }>();
+
+ipcMain.handle('servers:cancel', (event, id: string) => {
+  const search = serverSearches.get(event.sender.id);
+  if (search?.id === id) search.controller.abort();
+});
+
 ipcMain.handle('servers:search', async (event, request: { id: string; scope: 'internet' | 'favorites' | 'history' }) => {
   if (!['internet', 'favorites', 'history'].includes(request.scope)) throw new Error('Unknown server list.');
+  const senderId = event.sender.id;
+  serverSearches.get(senderId)?.controller.abort();
+  const controller = new AbortController();
+  serverSearches.set(senderId, { id: request.id, controller });
+  const cancelOnClose = () => controller.abort();
+  event.sender.once('destroyed', cancelOnClose);
   const settings = readSettings();
   const savedAddresses = request.scope === 'favorites'
     ? settings.favoriteServers ?? []
@@ -215,11 +228,14 @@ ipcMain.handle('servers:search', async (event, request: { id: string; scope: 'in
   log('INFO', 'Server search requested.', { scope: request.scope, savedCount: savedAddresses.length });
   try {
     return await scanServers(request.scope, savedAddresses, (progress) => {
-      event.sender.send('servers:progress', { id: request.id, ...progress });
-    }, log, gameExecutable(settings));
+      if (!controller.signal.aborted && !event.sender.isDestroyed()) event.sender.send('servers:progress', { id: request.id, ...progress });
+    }, log, gameExecutable(settings), controller.signal);
   } catch (error) {
     log('ERROR', 'Server search failed.', error);
     throw error;
+  } finally {
+    event.sender.removeListener('destroyed', cancelOnClose);
+    if (serverSearches.get(senderId)?.id === request.id) serverSearches.delete(senderId);
   }
 });
 

@@ -1,4 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type { DayZServer, ServerScanProgress as ScanProgress } from './server-browser.js';
+export type { DayZServer } from './server-browser.js';
 
 export interface WorkshopMod {
   id: string;
@@ -13,33 +15,10 @@ export interface AppStatus {
   mods: WorkshopMod[];
 }
 
-export interface DayZServer {
-  address: string;
-  host: string;
-  queryPort: number;
-  gamePort: number;
-  name: string;
-  map: string;
-  game: string;
-  players: number;
-  maxPlayers: number;
-  bots: number;
-  password: boolean;
-  vac: boolean;
-  version: string;
-  tags: string[];
-  ping: number | null;
-  lastSeen: number;
-  category: 'official' | 'community' | 'unverified';
-}
-
 export type ServerScope = 'internet' | 'favorites' | 'history';
 
-export interface ServerScanProgress {
+export interface ServerScanProgress extends ScanProgress {
   id: string;
-  total: number;
-  complete: number;
-  servers: DayZServer[];
 }
 
 contextBridge.exposeInMainWorld('dayz', {
@@ -54,6 +33,7 @@ contextBridge.exposeInMainWorld('dayz', {
   toggleServerFavorite: (address: string): Promise<string[]> => ipcRenderer.invoke('servers:toggle-favorite', address),
   addServer: (address: string): Promise<DayZServer[]> => ipcRenderer.invoke('servers:add-manual', address),
   searchServers: (id: string, scope: ServerScope): Promise<DayZServer[]> => ipcRenderer.invoke('servers:search', { id, scope }),
+  cancelServerSearch: (id: string): Promise<void> => ipcRenderer.invoke('servers:cancel', id),
   onServerProgress: (listener: (progress: ServerScanProgress) => void): (() => void) => {
     const handler = (_event: Electron.IpcRendererEvent, progress: ServerScanProgress) => listener(progress);
     ipcRenderer.on('servers:progress', handler);
