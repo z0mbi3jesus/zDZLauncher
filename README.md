@@ -40,6 +40,8 @@ Source lives in `src` (interface), `electron` (desktop integration and server di
 
 Server lists are retained for the current session when navigating between pages and sources. Use Refresh to update a list; during a refresh that button becomes Stop and retains listings already found. Leaving the server browser or switching sources cancels its scan. The list renders a small window of rows as you scroll, while search and filters apply to all loaded servers.
 
+The server browser has Official and Community tabs. Official shows only Bohemia-verified servers; Community holds all remaining listings, retaining Unverified labels where classification is uncertain. Internet, Favorites, and Recent sources work within either tab. Switching these type tabs filters the loaded list without starting another scan.
+
 ## First use
 
 1. Install DayZ and subscribe to mods in the DayZ Steam Workshop using Steam.

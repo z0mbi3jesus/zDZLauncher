@@ -2,3 +2,4 @@
 
 @media(max-width:1200px){.server-browser-layout{grid-template-columns:minmax(0,1fr) 238px;gap:8px}.server-scope-tabs button{gap:5px;padding:0 6px;font-size:8px}.server-metrics>div{padding:9px 10px}.server-metrics>div:nth-child(4){display:none}.server-metrics{grid-template-columns:repeat(3,minmax(0,1fr))}.server-filterbar{gap:9px}.ping-filter{margin-left:0}.server-search kbd{display:none}}
 @media(max-width:1020px){.server-browser-layout{grid-template-columns:minmax(0,1fr)}.server-detail-panel{display:none}.server-browser-page{padding-left:18px;padding-right:18px}.server-toolbar{flex-wrap:wrap}.server-search{order:3;flex-basis:100%}}.server-row{height:61px;min-height:61px;box-sizing:border-box}
+.server-category-tabs{align-self:flex-start;margin:0 0 16px}.server-category-tabs>button{min-height:40px;padding:0 20px}

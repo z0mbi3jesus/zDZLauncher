@@ -40,7 +40,7 @@ function App() {
   const [selectedServerAddress, setSelectedServerAddress] = useState('');
   const [serverSearch, setServerSearch] = useState('');
   const [serverMap, setServerMap] = useState('all');
-  const [serverCategory, setServerCategory] = useState<'all' | DayZServer['category']>('all');
+  const [serverCategory, setServerCategory] = useState<'official' | 'community'>('official');
   const [serverSort, setServerSort] = useState<'players' | 'ping' | 'name' | 'map'>('players');
   const [serverLoading, setServerLoading] = useState(false);
   const [serverProgress, setServerProgress] = useState({ complete: 0, total: 0 });
@@ -70,7 +70,7 @@ function App() {
   const visibleServers = useMemo(() => serverResults.filter((server) => {
     const matchesSearch = `${server.name} ${server.map} ${server.address} ${server.tags.join(' ')}`.toLowerCase().includes(deferredServerSearch.toLowerCase());
     return matchesSearch
-      && (serverCategory === 'all' || server.category === serverCategory)
+      && (serverCategory === 'official' ? server.category === 'official' : server.category !== 'official')
       && (serverMap === 'all' || server.map.toLowerCase() === serverMap.toLowerCase())
       && (!hideFull || server.players < server.maxPlayers)
       && (!hideEmpty || server.players > 0)
@@ -84,7 +84,8 @@ function App() {
   }), [hideEmpty, hideFull, maxPing, secureOnly, serverMap, serverCategory, serverResults, deferredServerSearch, serverSort]);
   const firstVisibleRow = Math.max(0, Math.min(Math.floor(serverScrollTop / 61) - 5, visibleServers.length - 30));
   const renderedServers = visibleServers.slice(firstVisibleRow, firstVisibleRow + 30);
-  const selectedServer = serverResults.find((server) => server.address === selectedServerAddress);
+  const selectedServer = visibleServers.find((server) => server.address === selectedServerAddress);
+  const officialServerCount = useMemo(() => serverResults.filter((server) => server.category === 'official').length, [serverResults]);
   const serverMaps = useMemo(() => [...new Set(serverResults.map((server) => server.map).filter(Boolean))].sort((a, b) => a.localeCompare(b)), [serverResults]);
   const typicalPing = useMemo(() => {
     const measured = serverResults.flatMap((server) => server.ping === null ? [] : [server.ping]).sort((a, b) => a - b);
@@ -372,6 +373,11 @@ function App() {
         {page === 'servers' && <div className="page-content server-browser-page">
           <div className="page-title-row server-title-row"><div><div className="eyebrow"><span className="live-pip" /> DAYZ SERVER DIRECTORY</div><h1>Server browser<span>.</span></h1><p>Official and community listings, server details and quick join.</p></div><button className="primary-action" onClick={() => setShowAddServer((current) => !current)}><Plus size={16} /> ADD SERVER</button></div>
 
+          <div className="server-scope-tabs server-category-tabs" role="tablist" aria-label="Server type">
+            <button role="tab" aria-selected={serverCategory === 'official'} className={serverCategory === 'official' ? 'selected' : ''} onClick={() => setServerCategory('official')}><ShieldCheck size={16} /> OFFICIAL <span>{officialServerCount.toLocaleString()}</span></button>
+            <button role="tab" aria-selected={serverCategory === 'community'} className={serverCategory === 'community' ? 'selected' : ''} onClick={() => setServerCategory('community')}><Users size={16} /> COMMUNITY <span>{(serverResults.length - officialServerCount).toLocaleString()}</span></button>
+          </div>
+
           <div className="server-metrics">
             <div><span>VISIBLE SERVERS</span><strong>{visibleServers.length.toLocaleString()}</strong><small>{serverLoading && serverProgress.total ? `SCANNING ${serverProgress.complete.toLocaleString()} / ${serverProgress.total.toLocaleString()}` : 'MATCHING CURRENT FILTERS'}</small></div>
             <div><span>SERVER RESULTS</span><strong>{serverResults.length.toLocaleString()}</strong><small>{serverScope === 'internet' ? 'STEAM SERVER LIST' : serverScope === 'favorites' ? 'SAVED FAVORITES' : 'RECENT CONNECTIONS'}</small></div>
@@ -394,7 +400,6 @@ function App() {
           {serverError && <div className="server-error"><CircleHelp size={16} /><span>{serverError}</span><button onClick={() => void scanServers()}>RETRY</button></div>}
 
           <div className="server-filterbar">
-            <label className="map-filter"><ShieldCheck size={15} /><select aria-label="Filter by server type" value={serverCategory} onChange={(event) => setServerCategory(event.target.value as typeof serverCategory)}><option value="all">All servers</option><option value="official">Official — verified</option><option value="community">Community</option><option value="unverified">Unverified</option></select><ChevronDown size={13} /></label>
             <label className="map-filter"><MapIcon size={15} /><select aria-label="Filter by map" value={serverMap} onChange={(event) => setServerMap(event.target.value)}><option value="all">All maps</option>{serverMaps.map((mapName) => <option key={mapName} value={mapName}>{mapName}</option>)}</select><ChevronDown size={13} /></label>
             <label className="server-check"><input type="checkbox" checked={hideFull} onChange={(event) => setHideFull(event.target.checked)} /><span />Hide full</label>
             <label className="server-check"><input type="checkbox" checked={hideEmpty} onChange={(event) => setHideEmpty(event.target.checked)} /><span />Hide empty</label>
