@@ -4,6 +4,7 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import path from 'node:path';
 import { getLogFile, initializeLogger, log } from './logger.js';
 import { parseServerAddress, queryAddressCandidates, scanServers, type DayZServer } from './server-browser.js';
+import { closeSteamDiscovery } from './steam-discovery.js';
 
 interface Settings {
   gamePath: string;
@@ -215,7 +216,7 @@ ipcMain.handle('servers:search', async (event, request: { id: string; scope: 'in
   try {
     return await scanServers(request.scope, savedAddresses, (progress) => {
       event.sender.send('servers:progress', { id: request.id, ...progress });
-    }, log);
+    }, log, gameExecutable(settings));
   } catch (error) {
     log('ERROR', 'Server search failed.', error);
     throw error;
@@ -294,5 +295,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   if (process.platform !== 'darwin') app.quit();
 });
+app.on('will-quit', closeSteamDiscovery);
 
 app.on('render-process-gone', (_event, _webContents, details) => log('ERROR', 'Renderer process exited.', details));

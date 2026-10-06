@@ -1,25 +1,57 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { buildMasterRequest, getSteamMasterEndpoints, parseInfo, parseMasterResponse, parseServerAddress, parseServerList, queryAddressCandidates } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { generateKeyPairSync, sign } from 'node:crypto';
+import { parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
-test('imports HTTPS directory snapshots without inventing local ping or response time', () => {
-  const row = { game: 'dayz', endpoint: { ip: '203.0.113.7', port: 27016 }, gamePort: 2302, name: 'Community server', players: 12, maxPlayers: 60, password: true, vac: true };
-  const servers = parseServerList({ status: 0, result: [row, row, { ...row, gamePort: 70000 }, null] });
-  assert.equal(servers.length, 1);
-  assert.equal(servers[0].address, '203.0.113.7:27016');
-  assert.equal(servers[0].gamePort, 2302);
-  assert.equal(servers[0].password, true);
-  assert.equal(servers[0].ping, null);
-  assert.equal(servers[0].lastSeen, 0);
-  assert.throws(() => parseServerList({ result: [] }), /no usable/);
-  assert.throws(() => parseServerList({ error: 'unavailable' }), /unexpected/);
+test('decodes Steam game and query ports separately without trusting official shard claims', () => {
+  const record = Buffer.alloc(364);
+  record.writeUInt16LE(2302, 0);
+  record.writeUInt16LE(27016, 2);
+  record.writeUInt32LE(0xcb007107, 4);
+  record.writeInt32LE(35, 8);
+  record[12] = 1;
+  record.write('chernarusplus', 46);
+  record.write('DayZ', 78);
+  record.writeInt32LE(12, 148);
+  record.writeInt32LE(60, 152);
+  record.write('Official candidate', 172);
+  record.write('battleye,shard001', 236);
+  const server = parseSteamServer(record);
+  assert.equal(server.address, '203.0.113.7:27016');
+  assert.equal(server.gamePort, 2302);
+  assert.equal(server.ping, 35);
+  assert.equal(server.category, 'unverified');
+  record.fill(0, 236);
+  record.write('battleye,external,privHive,shardABC123', 236);
+  record[12] = 0;
+  assert.equal(parseSteamServer(record).category, 'community');
+  assert.equal(parseSteamServer(record).ping, null);
 });
 
-test('uses the Valve master server on port 27011 with hostname and IP fallbacks', () => {
-  const endpoints = getSteamMasterEndpoints();
-  assert.deepEqual(endpoints[0], { host: 'hl2master.steampowered.com', port: 27011 });
-  assert.ok(endpoints.every((endpoint) => endpoint.port === 27011));
-  assert.ok(endpoints.some((endpoint) => endpoint.host === '208.64.200.65'));
+test('official verification binds the signature to the exact name and game endpoint', () => {
+  const { privateKey, publicKey } = generateKeyPairSync('rsa', { modulusLength: 2048 });
+  const server = { name: 'Official server', host: '203.0.113.7', gamePort: 2302 };
+  const encoded = sign('RSA-SHA256', Buffer.from('Official server203.0.113.7:2302'), privateKey).toString('base64');
+  const signatures = [`sign2:${encoded.slice(172)}`, `sign1:${encoded.slice(0, 172)}`];
+  assert.equal(verifyOfficialSignature(server, signatures, publicKey), true);
+  assert.equal(verifyOfficialSignature({ ...server, name: 'Copied name' }, signatures, publicKey), false);
+  assert.equal(verifyOfficialSignature({ ...server, gamePort: 2303 }, signatures, publicKey), false);
+  assert.equal(verifyOfficialSignature({ ...server, host: '203.0.113.8' }, signatures, publicKey), false);
+  assert.equal(verifyOfficialSignature(server, signatures.slice(0, 1), publicKey), false);
+});
+
+test('decodes DayZ rules signatures and rejects missing fragments and overflow', () => {
+  const payload = Buffer.concat([Buffer.from([2, 0, 0, 0, 0, 2, 9]), Buffer.from('sign1:abc'), Buffer.from([9]), Buffer.from('sign2:def')]);
+  // Correct length-prefixed signature strings are nine bytes each.
+  const escaped = Buffer.from([...payload].flatMap((byte) => byte === 0 ? [1, 2] : byte === 1 ? [1, 1] : byte === 255 ? [1, 3] : [byte]));
+  const packet = Buffer.concat([Buffer.from([255, 255, 255, 255, 69, 1, 0, 1, 1, 0]), escaped, Buffer.from([0])]);
+  assert.deepEqual(parseDayZSignatures(packet), ['sign1:abc', 'sign2:def']);
+  const missing = Buffer.from(packet);
+  missing[8] = 2;
+  assert.throws(() => parseDayZSignatures(missing), /Incomplete/);
+  const overflow = Buffer.from(packet);
+  overflow[11] = 2;
+  assert.throws(() => parseDayZSignatures(overflow), /truncated/);
 });
 
 test('parses IPv4 and hostname query addresses and rejects invalid ports', () => {
@@ -35,22 +67,6 @@ test('parses IPv4 and hostname query addresses and rejects invalid ports', () =>
   });
   assert.throws(() => parseServerAddress('play.example.net:70000'), /between 1 and 65535/);
   assert.throws(() => parseServerAddress('not-an-address'), /hostname:query-port/);
-});
-
-test('builds the Steam master request with ASCII cursor and NUL-delimited filter', () => {
-  const request = buildMasterRequest('0.0.0.0:0', '\\appid\\221100\\gamedir\\dayz');
-  assert.equal(request.subarray(0, 2).toString('hex'), '31ff');
-  assert.equal(request.subarray(2).toString('ascii'), '0.0.0.0:0\0\\appid\\221100\\gamedir\\dayz\0');
-});
-
-test('parses Steam master-server IPv4 and query-port records', () => {
-  const record = Buffer.from([203, 0, 113, 7, 0x69, 0x88]);
-  const packet = Buffer.concat([Buffer.from([0xff, 0xff, 0xff, 0xff, 0x66, 0x0a]), record, Buffer.alloc(6)]);
-  const result = parseMasterResponse(packet);
-  assert.deepEqual(result.servers, [{ host: '203.0.113.7', port: 27016 }]);
-  assert.equal(result.cursor, '203.0.113.7:27016');
-  assert.equal(result.done, true);
-  assert.equal(parseMasterResponse(packet.subarray(0, -6)).done, false);
 });
 
 test('parses DayZ A2S_INFO metadata including game port and keywords', () => {

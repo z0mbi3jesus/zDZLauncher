@@ -30,6 +30,7 @@ export interface DayZServer {
   tags: string[];
   ping: number | null;
   lastSeen: number;
+  category: 'official' | 'community' | 'unverified';
 }
 
 export type ServerScope = 'internet' | 'favorites' | 'history';

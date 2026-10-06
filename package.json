@@ -8,14 +8,15 @@
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --external:electron --outdir=dist-electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.js",
+    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --external:electron --external:koffi --outdir=dist-electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.js",
     "build": "npm run typecheck && npm run test:server-browser && vite build && npm run build:electron && electron-builder --dir --config.directories.output=launcher-build",
     "start": "electron .",
     "package": "npm run typecheck && npm run test:server-browser && vite build && npm run build:electron && electron-builder --config.directories.output=launcher-build",
     "typecheck": "tsc -b --pretty",
-    "test:server-browser": "esbuild electron/server-browser.ts --bundle --platform=node --format=esm --outfile=node_modules/.cache/dayz-launchpad-server-browser.mjs && node --test tests/server-browser.test.mjs"
+    "test:server-browser": "esbuild electron/server-browser.ts --bundle --platform=node --format=esm --external:koffi --outfile=node_modules/.cache/dayz-launchpad-server-browser.mjs && node --test tests/server-browser.test.mjs"
   },
   "dependencies": {
+    "koffi": "^3.3.2",
     "lucide-react": "^0.468.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
@@ -38,8 +39,15 @@
     "appId": "com.zdz.launchpad",
     "productName": "DZ Launchpad",
     "electronDist": "node_modules/electron/dist",
-    "directories": { "output": "build" },
-    "files": ["dist", "dist-electron"],
-    "win": { "target": "nsis" }
+    "directories": {
+      "output": "build"
+    },
+    "files": [
+      "dist",
+      "dist-electron"
+    ],
+    "win": {
+      "target": "nsis"
+    }
   }
 }

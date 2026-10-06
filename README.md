@@ -6,7 +6,7 @@ A Windows-first DayZ desktop launcher and local Steam Workshop mod manager built
 
 - Detects Steam libraries from common locations and the Windows Steam registry entry.
 - Finds the DayZ executable and lets you choose a custom install path.
-- Browses DayZ servers using the DZSA HTTPS directory, with Steam UDP discovery as a fallback and Source A2S queries for saved/manual servers, with progressive results, map/player/ping/security filters, and sort options. Manual add checks the entered port and then the common DayZ game-port-plus-one query port.
+- Browses DayZ servers directly through the running Steam client using Steamworks, with Source A2S queries for saved/manual servers, with progressive results, map/player/ping/security filters, and sort options. Manual add checks the entered port and then the common DayZ game-port-plus-one query port.
 - Saves favorite and recently joined servers, supports adding a server by query address, and launches directly to a selected server with the active local mod profile.
 - Scans locally downloaded DayZ Workshop items, reads mod names from `mod.cpp`, and opens mod folders or Workshop pages.
 - Toggles mods, arranges load order, and saves separate profiles on this PC.
@@ -15,7 +15,7 @@ A Windows-first DayZ desktop launcher and local Steam Workshop mod manager built
 
 ## Development
 
-Requires Node.js and npm on Windows.
+Requires Node.js and npm on Windows. Server discovery requires Steam running and signed in to an account that owns DayZ, plus an installed DayZ client. The launcher loads steam_api64.dll from that installation; it does not collect Steam credentials.
 
 ```powershell
 npm install
@@ -51,8 +51,8 @@ Runtime diagnostics are written to Electron's application data directory under `
 ## Current scope and limitations
 
 - Workshop search, subscription, and download are handed off to Steam; this app does not implement Steam authentication, SteamCMD, or direct downloads.
-- The server browser queries Valve's Source master endpoint at `hl2master.steampowered.com:27011` (with direct IP fallbacks) over UDP, then queries each server's UDP A2S port. Network policies, firewalls, or server query settings may hide results; manual address entry is available as a fallback.
-- Internet browsing first downloads the DZSA directory over HTTPS. Listings and player counts are provider snapshots, not locally verified live responses; ping is shown as unmeasured. A specific maximum-ping filter excludes unmeasured entries. This third-party directory is not guaranteed to include every official or community server. If it fails, the launcher falls back to Steam UDP discovery without a fixed server-count cap.
+- Internet discovery uses Steamworks RequestInternetServerList for DayZ app 221100. Worldwide and complementary population/mod/perspective requests are merged and deduplicated. Steam result limits, offline servers, and a 90-second refresh deadline mean complete coverage is not guaranteed; available listings are retained and limits are recorded in the log.
+- Official candidates are identified by reserved shard000-shard099 tags and verified against Bohemia's public RSA key at https://key-dayz.bistudio.com/public. DayZ rules signatures sign1/sign2 are checked with RSA/SHA-256 over the live server name plus game IP:port. Only passing servers appear in Official; community private-hive tags appear in Community. Unrecognized, failed, or timed-out candidates remain Unverified. Public keys and passing results are cached in memory for the current session; no competitor directory is used.
 - Server browser results include the data exposed by the Steam A2S query protocol. DayZ server-required Workshop mods are not reliably exposed by that protocol, so the launcher joins with the selected profile and does not claim to validate or automatically download server mods.
 - The first version is Windows-only and launches the standalone DayZ client. Presets import/export, mod update progress, and automatic dependency ordering are not implemented.
 - A mod's Workshop folder name is used as a fallback when no display name is present in `mod.cpp`.

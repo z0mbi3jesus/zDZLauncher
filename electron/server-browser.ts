@@ -1,5 +1,8 @@
 import { createSocket, type RemoteInfo } from 'node:dgram';
 import { lookup } from 'node:dns/promises';
+import { createPublicKey, verify, type KeyObject } from 'node:crypto';
+import { discoverSteamServers, serverCategory } from './steam-discovery.js';
+export { closeSteamDiscovery, parseSteamServer } from './steam-discovery.js';
 
 export interface DayZServer {
   address: string;
@@ -18,6 +21,7 @@ export interface DayZServer {
   tags: string[];
   ping: number | null;
   lastSeen: number;
+  category: 'official' | 'community' | 'unverified';
 }
 
 export interface ServerScanProgress {
@@ -28,57 +32,8 @@ export interface ServerScanProgress {
 
 export type ServerLog = (level: 'INFO' | 'WARN' | 'ERROR', message: string, details?: unknown) => void;
 
-export const MASTER_ENDPOINTS = [
-  { host: 'hl2master.steampowered.com', port: 27011 },
-  { host: '208.64.200.65', port: 27011 },
-  { host: '208.64.200.66', port: 27011 },
-];
-
-export function getSteamMasterEndpoints(): Array<{ host: string; port: number }> {
-  return MASTER_ENDPOINTS.map((endpoint) => ({ ...endpoint }));
-}
-
 const QUERY_TIMEOUT_MS = 1400;
 const QUERY_CONCURRENCY = 48;
-const FIRST_MASTER_CURSOR = '0.0.0.0:0';
-const DZSA_SERVER_LIST_URL = 'https://dayzsalauncher.com/api/v1/launcher/servers/dayz';
-
-export function parseServerList(payload: unknown): DayZServer[] {
-  if (!payload || typeof payload !== 'object' || !('result' in payload) || !Array.isArray(payload.result)) {
-    throw new Error('The server-list service returned an unexpected response.');
-  }
-  const servers = new Map<string, DayZServer>();
-  for (const row of payload.result) {
-    try {
-      if (!row || typeof row !== 'object' || row.game !== 'dayz' || typeof row.endpoint?.ip !== 'string') continue;
-      const { host, port, address } = parseServerAddress(`${row.endpoint.ip}:${row.endpoint.port}`);
-      if (!Number.isInteger(row.gamePort) || row.gamePort < 1 || row.gamePort > 65535) continue;
-      if (typeof row.name !== 'string' || !Number.isInteger(row.players) || row.players < 0 || !Number.isInteger(row.maxPlayers) || row.maxPlayers < 0) continue;
-      servers.set(address, {
-        address, host, queryPort: port, gamePort: row.gamePort,
-        name: row.name, map: typeof row.map === 'string' ? row.map : '', game: 'DayZ',
-        players: row.players, maxPlayers: row.maxPlayers, bots: 0,
-        password: row.password === true, vac: row.vac === true,
-        version: typeof row.version === 'string' ? row.version : '',
-        tags: [row.shard === 'public' ? 'public hive' : row.shard === 'private' ? 'private hive' : '', row.firstPersonOnly === true ? 'firstperson' : ''].filter(Boolean),
-        ping: null, lastSeen: 0, // Provider snapshot; not a local response or measured timestamp.
-      });
-    } catch {
-      // Ignore malformed entries without losing the rest of the directory.
-    }
-  }
-  if (!servers.size) throw new Error('The server-list service returned no usable DayZ servers.');
-  return [...servers.values()];
-}
-
-export async function downloadServerList(writeLog: ServerLog = () => undefined): Promise<DayZServer[]> {
-  writeLog('INFO', 'Downloading DZSA server directory over HTTPS.');
-  const response = await fetch(DZSA_SERVER_LIST_URL, { signal: AbortSignal.timeout(20000) });
-  if (!response.ok) throw new Error(`The server-list service returned HTTP ${response.status}.`);
-  const servers = parseServerList(await response.json());
-  writeLog('INFO', 'DZSA server directory downloaded.', { count: servers.length });
-  return servers;
-}
 
 function formatAddress(host: string, port: number): string {
   return host.includes(':') ? `[${host}]:${port}` : `${host}:${port}`;
@@ -149,6 +104,7 @@ export function parseInfo(packet: Buffer, host: string, queryPort: number, ping:
     tags: keywords,
     ping,
     lastSeen: Date.now(),
+    category: serverCategory(keywords),
   };
 }
 
@@ -195,82 +151,6 @@ async function queryInfo(host: string, port: number): Promise<DayZServer> {
   return parseInfo(response.packet, resolvedHost, port, Date.now() - start);
 }
 
-export function buildMasterRequest(cursor: string, filter: string): Buffer {
-  return Buffer.concat([
-    Buffer.from([0x31, 0xff]),
-    Buffer.from(cursor, 'ascii'),
-    Buffer.from([0]),
-    Buffer.from(filter, 'utf8'),
-    Buffer.from([0]),
-  ]);
-}
-
-export function parseMasterResponse(packet: Buffer): { servers: Array<{ host: string; port: number }>; cursor?: string; done: boolean } {
-  const header = Buffer.from([0xff, 0xff, 0xff, 0xff, 0x66, 0x0a]);
-  if (packet.length < header.length || !packet.subarray(0, header.length).equals(header)) {
-    throw new Error('Steam returned an unexpected master-server response.');
-  }
-  let offset = header.length;
-  const servers: Array<{ host: string; port: number }> = [];
-  let cursor: string | undefined;
-  let done = false;
-  while (offset + 6 <= packet.length) {
-    const entry = packet.subarray(offset, offset + 6);
-    offset += 6;
-    const host = `${entry[0]}.${entry[1]}.${entry[2]}.${entry[3]}`;
-    const port = entry.readUInt16BE(4);
-    if (host === '0.0.0.0' && port === 0) {
-      done = true;
-      break;
-    }
-    cursor = `${host}:${port}`;
-    servers.push({ host, port });
-  }
-  return { servers, cursor, done };
-}
-
-async function masterPage(host: string, port: number, cursor: string): Promise<Buffer> {
-  const request = buildMasterRequest(cursor, '\\appid\\221100\\gamedir\\dayz');
-  return (await udpRequest(host, port, request, 4500)).packet;
-}
-
-export async function discoverAddresses(writeLog: ServerLog = () => undefined): Promise<Array<{ host: string; port: number }>> {
-  for (const endpoint of getSteamMasterEndpoints()) {
-    writeLog('INFO', 'Querying Steam Source master endpoint.', endpoint);
-    try {
-      const servers: Array<{ host: string; port: number }> = [];
-      const seen = new Set<string>();
-      let cursor = FIRST_MASTER_CURSOR;
-      const cursors = new Set<string>();
-      while (true) {
-        if (cursors.has(cursor)) throw new Error('Steam master pagination repeated a cursor before completing.');
-        cursors.add(cursor);
-        const page = parseMasterResponse(await masterPage(endpoint.host, endpoint.port, cursor));
-        if (!page.servers.length && !page.done) throw new Error('Steam returned an incomplete master-server page.');
-        for (const server of page.servers) {
-          const key = `${server.host}:${server.port}`;
-          if (!seen.has(key)) {
-            seen.add(key);
-            servers.push(server);
-          }
-        }
-        if (page.done) break;
-        if (!page.cursor) throw new Error('Steam master response has no continuation cursor.');
-        cursor = page.cursor;
-      }
-      writeLog('INFO', 'Steam master query completed.', { count: servers.length });
-      return servers;
-    } catch (error) {
-      writeLog('WARN', 'Steam master query failed.', error);
-      continue;
-    }
-  }
-  const endpoints = getSteamMasterEndpoints().map((endpoint) => `${endpoint.host}:${endpoint.port}`).join(', ');
-  const message = `Could not reach Steam server discovery at ${endpoints} over UDP. Check that your firewall or router allows outbound UDP, then retry; direct server addresses are still available.`;
-  writeLog('ERROR', message);
-  throw new Error(message);
-}
-
 export function parseServerAddress(input: string): { host: string; port: number; address: string } {
   const value = input.trim().replace(/^(?:dayz|steam):\/\//i, '');
   const match = value.match(/^\[([0-9a-f:]+)]:(\d{1,5})$|^([a-z0-9.-]+):(\d{1,5})$/i);
@@ -286,6 +166,125 @@ export function queryAddressCandidates(input: string): string[] {
   const candidates = [parsed.address];
   if (parsed.port < 65535) candidates.push(formatAddress(parsed.host, parsed.port + 1));
   return candidates;
+}
+
+export function parseDayZSignatures(packet: Buffer): string[] {
+  if (packet.length < 7 || packet.readInt32LE(0) !== -1 || packet[4] !== 0x45) throw new Error('Unexpected DayZ rules response.');
+  let offset = 7;
+  const fragments = new Map<number, Buffer>();
+  let total = 0;
+  const readString = () => {
+    const end = packet.indexOf(0, offset);
+    if (end < 0) throw new Error('Truncated DayZ rules.');
+    const value = packet.subarray(offset, end);
+    offset = end + 1;
+    return value;
+  };
+  for (let index = 0; index < packet.readUInt16LE(5); index++) {
+    const key = readString();
+    const value = readString();
+    if (key.length !== 2 || !key[0] || key[0] > key[1]) continue;
+    if ((total && total !== key[1]) || fragments.has(key[0])) throw new Error('Inconsistent DayZ rules fragments.');
+    total = key[1];
+    fragments.set(key[0], value);
+  }
+  if (!total || fragments.size !== total) throw new Error('Incomplete DayZ rules fragments.');
+  const escaped = Buffer.concat(Array.from({ length: total }, (_, index) => fragments.get(index + 1)!));
+  const bytes: number[] = [];
+  for (let index = 0; index < escaped.length; index++) {
+    if (escaped[index] !== 1) bytes.push(escaped[index]);
+    else {
+      const code = escaped[++index];
+      if (code === 1) bytes.push(1);
+      else if (code === 2) bytes.push(0);
+      else if (code === 3) bytes.push(255);
+      else throw new Error('Invalid DayZ rules escape.');
+    }
+  }
+  const data = Buffer.from(bytes);
+  let cursor = 0;
+  const take = (length: number) => {
+    if (cursor + length > data.length) throw new Error('Truncated DayZ rules payload.');
+    const value = data.subarray(cursor, cursor + length);
+    cursor += length;
+    return value;
+  };
+  const byte = () => take(1)[0];
+  if (byte() !== 2) throw new Error('Unsupported DayZ rules protocol.');
+  const flags = byte();
+  if (flags & 2) throw new Error('Server signatures are truncated.');
+  const dlc = take(2).readUInt16LE(0);
+  for (let bit = 0; bit < 16; bit++) if (dlc & (1 << bit)) take(4);
+  const mods = byte();
+  for (let index = 0; index < mods; index++) {
+    take(4);
+    const width = byte() & 15;
+    if (width < 1 || width > 8) throw new Error('Invalid Workshop ID width.');
+    take(width);
+    take(byte());
+  }
+  const signatures: string[] = [];
+  const count = byte();
+  for (let index = 0; index < count; index++) signatures.push(take(byte()).toString('utf8'));
+  return signatures;
+}
+
+export function verifyOfficialSignature(server: Pick<DayZServer, 'name' | 'host' | 'gamePort'>, signatures: string[], key: KeyObject): boolean {
+  const first = signatures.filter((value) => value.startsWith('sign1:'));
+  const second = signatures.filter((value) => value.startsWith('sign2:'));
+  if (first.length !== 1 || second.length !== 1) return false;
+  const encoded = first[0].slice(6) + second[0].slice(6);
+  if (!/^[A-Za-z0-9+/]+={0,2}$/.test(encoded)) return false;
+  return verify('RSA-SHA256', Buffer.from(server.name + formatAddress(server.host, server.gamePort), 'utf8'), key, Buffer.from(encoded, 'base64'));
+}
+
+let publicKey: KeyObject | undefined;
+let keyFetchedAt = 0;
+const verifiedServers = new Map<string, number>();
+
+async function bohemiaPublicKey(writeLog: ServerLog): Promise<KeyObject | undefined> {
+  if (publicKey && Date.now() - keyFetchedAt < 86400000) return publicKey;
+  try {
+    const response = await fetch('https://key-dayz.bistudio.com/public', { signal: AbortSignal.timeout(5000) });
+    if (!response.ok) throw new Error(`Bohemia key endpoint returned HTTP ${response.status}.`);
+    const data = await response.json() as { keys: { public: { modulus: string; publicExp: string } } };
+    const key = data.keys.public;
+    publicKey = createPublicKey({ key: { kty: 'RSA', n: Buffer.from(key.modulus, 'base64').toString('base64url'), e: Buffer.from(key.publicExp, 'base64').toString('base64url') }, format: 'jwk' });
+    keyFetchedAt = Date.now();
+  } catch (error) {
+    writeLog('WARN', 'Bohemia verification key unavailable; official candidates remain unverified without a cached key.', error);
+  }
+  return publicKey;
+}
+
+async function verifyOfficialCandidates(servers: DayZServer[], progress: (value: ServerScanProgress) => void, writeLog: ServerLog) {
+  const candidates = servers.filter((server) => server.tags.some((tag) => /^shard0\d{2}$/i.test(tag)));
+  if (!candidates.length) return;
+  const key = await bohemiaPublicKey(writeLog);
+  if (!key) return;
+  let verified = 0;
+  await mapLimit(candidates, 12, async (server) => {
+    const cacheId = JSON.stringify([server.host, server.queryPort, server.gamePort, server.name]);
+    if (Date.now() - (verifiedServers.get(cacheId) ?? 0) < 600000) {
+      server.category = 'official';
+      verified++;
+      return;
+    }
+    const live = await queryInfo(server.host, server.queryPort);
+    let response = await udpRequest(live.host, live.queryPort, Buffer.from([255, 255, 255, 255, 86, 255, 255, 255, 255]));
+    if (response.packet.length >= 9 && response.packet[4] === 0x41) {
+      response = await udpRequest(live.host, live.queryPort, Buffer.concat([Buffer.from([255, 255, 255, 255, 86]), response.packet.subarray(5, 9)]));
+    }
+    if (verifyOfficialSignature(live, parseDayZSignatures(response.packet), key)) {
+      Object.assign(server, live, { category: 'official' });
+      if (verifiedServers.size >= 2000) verifiedServers.clear();
+      verifiedServers.set(JSON.stringify([live.host, live.queryPort, live.gamePort, live.name]), Date.now());
+      verified++;
+    }
+  }, (_result, complete) => {
+    if (complete % 12 === 0 || complete === candidates.length) progress({ total: servers.length, complete: servers.length, servers: [...servers] });
+  });
+  writeLog('INFO', 'Bohemia official-server verification finished.', { candidates: candidates.length, verified, unverified: candidates.length - verified });
 }
 
 async function mapLimit<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>, completed: (result: R | undefined, count: number, error: unknown | undefined, item: T) => void): Promise<R[]> {
@@ -316,20 +315,15 @@ export async function scanServers(
   savedAddresses: string[],
   onProgress: (progress: ServerScanProgress) => void,
   writeLog: ServerLog = () => undefined,
+  gameExecutable = '',
 ): Promise<DayZServer[]> {
   writeLog('INFO', 'Starting server scan.', { scope, savedCount: savedAddresses.length });
   if (scope === 'internet') {
-    try {
-      const servers = (await downloadServerList(writeLog)).sort((left, right) => right.players - left.players);
-      onProgress({ total: servers.length, complete: servers.length, servers });
-      return servers;
-    } catch (error) {
-      writeLog('WARN', 'HTTPS directory unavailable; trying Steam UDP discovery.', error);
-    }
+    const servers = await discoverSteamServers(gameExecutable, onProgress, writeLog);
+    await verifyOfficialCandidates(servers, onProgress, writeLog);
+    return servers.sort((left, right) => right.players - left.players);
   }
-  const addresses = scope === 'internet'
-    ? await discoverAddresses(writeLog)
-    : savedAddresses.map((address) => parseServerAddress(address));
+  const addresses = savedAddresses.map((address) => parseServerAddress(address));
   const candidates = addresses;
   const found: DayZServer[] = [];
   const recentOrder = new Map(candidates.map((server, index) => [formatAddress(server.host, server.port), index]));
@@ -354,5 +348,6 @@ export async function scanServers(
     }
   });
   writeLog('INFO', 'Server scan finished.', { queried: candidates.length, online: found.length, failed: failures });
+  await verifyOfficialCandidates(found, onProgress, writeLog);
   return sortResults(found);
 }
