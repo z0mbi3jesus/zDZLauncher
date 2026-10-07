@@ -168,7 +168,9 @@ export function queryAddressCandidates(input: string): string[] {
   return candidates;
 }
 
-export function parseDayZSignatures(packet: Buffer): string[] {
+export interface ServerMod { id: string; name: string; }
+
+export function parseDayZRules(packet: Buffer): { mods: ServerMod[]; signatures: string[]; modsComplete: boolean; signaturesComplete: boolean } {
   if (packet.length < 7 || packet.readInt32LE(0) !== -1 || packet[4] !== 0x45) throw new Error('Unexpected DayZ rules response.');
   let offset = 7;
   const fragments = new Map<number, Buffer>();
@@ -212,21 +214,48 @@ export function parseDayZSignatures(packet: Buffer): string[] {
   const byte = () => take(1)[0];
   if (byte() !== 2) throw new Error('Unsupported DayZ rules protocol.');
   const flags = byte();
-  if (flags & 2) throw new Error('Server signatures are truncated.');
+
   const dlc = take(2).readUInt16LE(0);
   for (let bit = 0; bit < 16; bit++) if (dlc & (1 << bit)) take(4);
-  const mods = byte();
-  for (let index = 0; index < mods; index++) {
+  const modCount = byte();
+  const mods: ServerMod[] = [];
+  for (let index = 0; index < modCount; index++) {
     take(4);
     const width = byte() & 15;
     if (width < 1 || width > 8) throw new Error('Invalid Workshop ID width.');
-    take(width);
-    take(byte());
+    const encodedId = take(width);
+    let id = 0n;
+    for (let offset = width - 1; offset >= 0; offset--) id = (id << 8n) | BigInt(encodedId[offset]);
+    const name = take(byte()).toString('utf8');
+    mods.push({ id: id.toString(), name: name || `Workshop ${id}` });
   }
   const signatures: string[] = [];
   const count = byte();
   for (let index = 0; index < count; index++) signatures.push(take(byte()).toString('utf8'));
-  return signatures;
+  return { mods, signatures, signaturesComplete: !(flags & 2), modsComplete: !(flags & 1) && mods.every((mod) => mod.id !== '0') };
+}
+
+export function parseDayZSignatures(packet: Buffer): string[] {
+  const rules = parseDayZRules(packet);
+  if (!rules.signaturesComplete) throw new Error('Server signatures are truncated.');
+  return rules.signatures;
+}
+
+export function matchServerMods(required: ServerMod[], installed: { id: string; path: string }[]) {
+  const local = new Map(installed.map((mod) => [mod.id, mod.path]));
+  return required.map((mod) => ({ ...mod, installed: local.has(mod.id) }));
+}
+
+export async function queryServerMods(address: string): Promise<ServerMod[]> {
+  const { host, port } = parseServerAddress(address);
+  const resolved = (await lookup(host, { family: host.includes(':') ? 6 : 4 })).address;
+  let response = await udpRequest(resolved, port, Buffer.from([255, 255, 255, 255, 86, 255, 255, 255, 255]), 4000);
+  if (response.packet.length >= 9 && response.packet.readInt32LE(0) === -1 && response.packet[4] === 0x41) {
+    response = await udpRequest(resolved, port, Buffer.concat([Buffer.from([255, 255, 255, 255, 86]), response.packet.subarray(5, 9)]), 4000);
+  }
+  const rules = parseDayZRules(response.packet);
+  if (!rules.modsComplete) throw new Error('The server returned an incomplete mod list. Cannot safely prepare its loadout.');
+  return rules.mods;
 }
 
 export function verifyOfficialSignature(server: Pick<DayZServer, 'name' | 'host' | 'gamePort'>, signatures: string[], key: KeyObject): boolean {

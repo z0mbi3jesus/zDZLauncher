@@ -3,7 +3,7 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getLogFile, initializeLogger, log } from './logger.js';
-import { parseServerAddress, queryAddressCandidates, scanServers, type DayZServer } from './server-browser.js';
+import { parseServerAddress, queryAddressCandidates, queryServerMods, matchServerMods, scanServers, type DayZServer } from './server-browser.js';
 import { closeSteamDiscovery } from './steam-discovery.js';
 
 interface Settings {
@@ -103,13 +103,17 @@ function scanMods() {
   const workshopPath = candidates.find(existsSync) ?? '';
   if (!workshopPath) return { workshopPath: '', mods: [] };
 
-  const mods = readdirSync(workshopPath, { withFileTypes: true })
-    .filter((entry) => entry.isDirectory() && /^\d+$/.test(entry.name))
-    .map((entry) => {
-      const modPath = path.join(workshopPath, entry.name);
-      return { id: entry.name, name: parseModName(modPath, entry.name), path: modPath };
-    })
-    .sort((left, right) => left.name.localeCompare(right.name));
+  const discovered = new Map<string, { id: string; name: string; path: string }>();
+  for (const folder of candidates.filter(existsSync)) {
+    for (const entry of readdirSync(folder, { withFileTypes: true })) {
+      if (!entry.isDirectory() || !/^\d+$/.test(entry.name)) continue;
+      const modPath = path.join(folder, entry.name);
+      // Steam can create a directory before an item has finished downloading.
+      if (!existsSync(path.join(modPath, 'addons')) && !existsSync(path.join(modPath, 'Addons'))) continue;
+      if (!discovered.has(entry.name)) discovered.set(entry.name, { id: entry.name, name: parseModName(modPath, entry.name), path: modPath });
+    }
+  }
+  const mods = [...discovered.values()].sort((left, right) => left.name.localeCompare(right.name));
 
   return { workshopPath, mods };
 }
@@ -271,6 +275,11 @@ ipcMain.handle('servers:add-manual', async (_event, address: string) => {
   return servers;
 });
 
+ipcMain.handle('servers:mods', async (_event, address: string) => {
+  const required = await queryServerMods(address);
+  return matchServerMods(required, scanMods().mods);
+});
+
 ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
   const host = request.host.includes(':') ? `[${request.host}]` : request.host;
   const parsed = parseServerAddress(`${host}:${request.queryPort}`);
@@ -282,7 +291,10 @@ ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
   const executable = gameExecutable(readSettings());
   if (!executable || !existsSync(executable)) throw new Error('DayZ was not found. Set the game path in Settings.');
   const installedMods = new Map(scanMods().mods.map((mod) => [mod.id, mod.path]));
-  const modPaths = request.modIds.map((id) => installedMods.get(id)).filter((modPath): modPath is string => Boolean(modPath));
+  const required = await queryServerMods(parsed.address);
+  const missing = required.filter((mod) => !installedMods.has(mod.id));
+  if (missing.length) throw new Error(`Install the required Workshop mods before joining: ${missing.map((mod) => mod.name).join(', ')}`);
+  const modPaths = required.map((mod) => installedMods.get(mod.id)!);
   const args = [`-connect=${parsed.host}`, `-port=${request.gamePort}`];
   if (password) args.push(`-password=${password}`);
   if (modPaths.length) args.push(`-mod=${modPaths.join(';')}`);

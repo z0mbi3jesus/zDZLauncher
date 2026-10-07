@@ -1,4 +1,4 @@
-import type { AppStatus, DayZServer, ServerScanProgress, ServerScope, WorkshopMod } from '../electron/preload';
+import type { AppStatus, DayZServer, ServerScanProgress, ServerScope, WorkshopMod, ServerModMatch } from '../electron/preload';
 
 declare global {
   interface Window {
@@ -16,6 +16,7 @@ declare global {
       searchServers: (id: string, scope: ServerScope) => Promise<DayZServer[]>;
       cancelServerSearch: (id: string) => Promise<void>;
       onServerProgress: (listener: (progress: ServerScanProgress) => void) => () => void;
+      serverMods: (address: string) => Promise<ServerModMatch[]>;
       joinServer: (server: DayZServer, modIds: string[], password?: string) => Promise<boolean>;
     };
   }

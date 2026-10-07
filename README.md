@@ -7,7 +7,7 @@ A Windows-first DayZ desktop launcher and local Steam Workshop mod manager built
 - Detects Steam libraries from common locations and the Windows Steam registry entry.
 - Finds the DayZ executable and lets you choose a custom install path.
 - Browses DayZ servers directly through the running Steam client using Steamworks, with Source A2S queries for saved/manual servers, with progressive results, map/player/ping/security filters, and sort options. Manual add checks the entered port and then the common DayZ game-port-plus-one query port.
-- Saves favorite and recently joined servers, supports adding a server by query address, and launches directly to a selected server with the active local mod profile.
+- Saves favorite and recently joined servers, supports adding a server by query address, and matches required server Workshop mods to installed items and launches with the server-advertised loadout.
 - Scans locally downloaded DayZ Workshop items, reads mod names from `mod.cpp`, and opens mod folders or Workshop pages.
 - Toggles mods, arranges load order, and saves separate profiles on this PC.
 - Launches `DayZ_x64.exe` with the enabled profile passed as a `-mod=` load list.
@@ -59,7 +59,7 @@ Runtime diagnostics are written to Electron's application data directory under `
 - Workshop search, subscription, and download are handed off to Steam; this app does not implement Steam authentication, SteamCMD, or direct downloads.
 - Internet discovery uses Steamworks RequestInternetServerList for DayZ app 221100. Worldwide and complementary population/mod/perspective requests are merged and deduplicated. Steam result limits, offline servers, and a 90-second refresh deadline mean complete coverage is not guaranteed; available listings are retained and limits are recorded in the log.
 - Official candidates are identified by reserved shard000-shard099 tags and verified against Bohemia's public RSA key at https://key-dayz.bistudio.com/public. DayZ rules signatures sign1/sign2 are checked with RSA/SHA-256 over the live server name plus game IP:port. Only passing servers appear in Official; community private-hive tags appear in Community. Unrecognized, failed, or timed-out candidates remain Unverified. Public keys and passing results are cached in memory for the current session; no competitor directory is used.
-- Server browser results include the data exposed by the Steam A2S query protocol. DayZ server-required Workshop mods are not reliably exposed by that protocol, so the launcher joins with the selected profile and does not claim to validate or automatically download server mods.
+- Selecting a server queries its DayZ A2S_RULES mod list and displays installed/missing Workshop items. Get Mod opens the Workshop page; subscribe and let Steam download, then use Recheck Mods. Joining queries the list again and uses only those mods in advertised order, without changing saved profiles. Empty complete lists launch vanilla. Failed, unsupported, or truncated responses and unpublished mods block joining. Automatic subscriptions, downloads, mod version checks, and dependency resolution are not implemented.
 - The first version is Windows-only and launches the standalone DayZ client. Presets import/export, mod update progress, and automatic dependency ordering are not implemented.
 - A mod's Workshop folder name is used as a fallback when no display name is present in `mod.cpp`.
 - Mods are passed in profile order. Confirm server-specific load order and dependencies before joining a modded server.

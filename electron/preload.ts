@@ -15,6 +15,8 @@ export interface AppStatus {
   mods: WorkshopMod[];
 }
 
+export interface ServerModMatch { id: string; name: string; installed: boolean; }
+
 export type ServerScope = 'internet' | 'favorites' | 'history';
 
 export interface ServerScanProgress extends ScanProgress {
@@ -39,6 +41,7 @@ contextBridge.exposeInMainWorld('dayz', {
     ipcRenderer.on('servers:progress', handler);
     return () => ipcRenderer.removeListener('servers:progress', handler);
   },
+  serverMods: (address: string): Promise<ServerModMatch[]> => ipcRenderer.invoke('servers:mods', address),
   joinServer: (server: DayZServer, modIds: string[], password?: string): Promise<boolean> => ipcRenderer.invoke('servers:join', {
     host: server.host,
     queryPort: server.queryPort,

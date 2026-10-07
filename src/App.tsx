@@ -6,7 +6,7 @@ import {
   Settings2, ShieldCheck, Signal, SlidersHorizontal, Sparkles, Star, Users,
   Wrench, X,
 } from 'lucide-react';
-import type { AppStatus, DayZServer, ServerScope, WorkshopMod } from '../electron/preload';
+import type { AppStatus, DayZServer, ServerScope, WorkshopMod, ServerModMatch } from '../electron/preload';
 
 type Page = 'launch' | 'servers' | 'mods' | 'profiles' | 'settings';
 type StoredProfile = { id: string; name: string; modIds: string[] };
@@ -34,6 +34,11 @@ function App() {
   const [working, setWorking] = useState(false);
   const [notice, setNotice] = useState('');
   const [runtimeLogPath, setRuntimeLogPath] = useState('');
+  const [serverModList, setServerModList] = useState<ServerModMatch[]>([]);
+  const [serverModsLoading, setServerModsLoading] = useState(false);
+  const [serverModsError, setServerModsError] = useState('');
+  const [modCheckVersion, setModCheckVersion] = useState(0);
+  const joining = useRef(false);
   const [serverScope, setServerScope] = useState<ServerScope>('internet');
   const [serverResults, setServerResults] = useState<DayZServer[]>([]);
   const [serverFavorites, setServerFavorites] = useState<string[]>([]);
@@ -215,19 +220,40 @@ function App() {
     }
   }
 
+  useEffect(() => {
+    let cancelled = false;
+    setServerModList([]);
+    setServerModsError('');
+    setServerModsLoading(Boolean(selectedServerAddress));
+    if (selectedServerAddress) {
+      window.dayz.serverMods(selectedServerAddress).then((result) => {
+        if (!cancelled) setServerModList(result);
+      }).catch((error) => {
+        if (!cancelled) setServerModsError(error instanceof Error ? error.message : 'Could not retrieve required mods.');
+      }).finally(() => { if (!cancelled) setServerModsLoading(false); });
+    }
+    return () => { cancelled = true; };
+  }, [selectedServerAddress, modCheckVersion]);
+
   async function joinServer(server: DayZServer) {
     if (!status.gameFound) {
       setNotice('Set the DayZ installation path in Settings before joining.');
       return;
     }
+    if (joining.current) return;
     const password = server.password ? window.prompt(`Password for ${server.name}`) : undefined;
     if (server.password && password === null) return;
+    joining.current = true;
     try {
-      await window.dayz.joinServer(server, enabledMods.map((mod) => mod.id), password ?? undefined);
+      setNotice(`Checking required mods for ${server.name}...`);
+      await window.dayz.joinServer(server, [], password ?? undefined);
       delete serverCache.current.history;
       setNotice(`Connecting to ${server.name}.`);
     } catch (error) {
       setNotice(error instanceof Error ? error.message : 'Could not join the server.');
+      setModCheckVersion((value) => value + 1);
+    } finally {
+      joining.current = false;
     }
   }
 
@@ -437,8 +463,10 @@ function App() {
                   <div className="detail-player-summary"><Users size={16} /><strong>{selectedServer.players}<i> / {selectedServer.maxPlayers}</i></strong><span>PLAYERS</span></div>
                   <div className="detail-facts"><div><span>SERVER TYPE</span><strong>{selectedServer.category === 'official' ? 'BOHEMIA VERIFIED' : selectedServer.category === 'community' ? 'COMMUNITY' : 'UNVERIFIED'}</strong></div><div><span>MAP</span><strong>{selectedServer.map || 'Unknown'}</strong></div><div><span>GAME PORT</span><strong>{selectedServer.gamePort}</strong></div><div><span>VERSION</span><strong>{selectedServer.version || 'Unknown'}</strong></div><div><span>ANTI-CHEAT</span><strong className={selectedServer.vac ? 'fact-good' : ''}>{selectedServer.vac ? 'VAC SECURE' : 'NOT ADVERTISED'}</strong></div><div><span>PASSWORD</span><strong>{selectedServer.password ? 'REQUIRED' : 'NONE'}</strong></div><div><span>QUERY PING</span><strong>{selectedServer.ping === null ? 'NOT MEASURED' : selectedServer.ping + ' MS'}</strong></div></div>
                   {selectedServer.tags.length > 0 && <div className="server-tags">{selectedServer.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}</div>}
-                  <div className="join-mod-note"><Gamepad2 size={15} /><span>Joining with <strong>{enabledMods.length} active profile mods</strong>. Server-required mods are not yet advertised by the query protocol.</span></div>
-                  <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || serverLoading}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
+                  <div className="join-mod-note"><Gamepad2 size={15} /><span>{serverModsLoading ? 'Checking required mods...' : serverModsError || (serverModList.length ? `${serverModList.filter((mod) => mod.installed).length}/${serverModList.length} required mods installed. Server loadout is applied automatically.` : 'No mods required. Joining with a vanilla loadout.')}</span></div>
+                  <div className="server-required-mods">{serverModList.map((mod, index) => <div key={`${mod.id}-${index}`}><span>{mod.installed ? 'Installed: ' : 'Missing: '}{mod.name}</span><button className="text-button" onClick={() => void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.installed ? 'WORKSHOP' : 'GET MOD'}</button></div>)}</div>
+                  <button className="text-button" disabled={serverModsLoading} onClick={() => setModCheckVersion((value) => value + 1)}>RECHECK MODS</button>
+                  <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || serverLoading || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => !mod.installed)}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
                   {!status.gameFound && <small className="join-blocked">Set the DayZ game path in Settings to enable joining.</small>}
                 </div>
               </> : <div className="server-detail-empty"><Signal size={25} /><strong>SELECT A SERVER</strong><span>Server details, security and quick join appear here.</span></div>}

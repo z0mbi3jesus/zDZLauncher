@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
 test('a cancelled internet scan does not initialize Steam or publish results', async () => {
   const controller = new AbortController();
@@ -60,7 +60,7 @@ test('decodes DayZ rules signatures and rejects missing fragments and overflow',
   assert.throws(() => parseDayZSignatures(missing), /Incomplete/);
   const overflow = Buffer.from(packet);
   overflow[11] = 2;
-  assert.throws(() => parseDayZSignatures(overflow), /truncated/);
+  assert.throws(() => parseDayZSignatures(overflow), /truncated|Invalid Workshop ID width/);
 });
 
 test('parses IPv4 and hostname query addresses and rejects invalid ports', () => {
@@ -122,4 +122,35 @@ test('tries the entered port and common DayZ game-port-plus-one query port', () 
     '85.190.152.177:10401',
   ]);
   assert.deepEqual(queryAddressCandidates('[2001:db8::8]:65535'), ['[2001:db8::8]:65535']);
+});
+
+function modRules(records, flags = 0) {
+  const parts = [Buffer.from([2, flags, 0, 0, records.length])];
+  for (const [id, name] of records) {
+    const value = Buffer.alloc(8);
+    value.writeBigUInt64LE(BigInt(id));
+    const title = Buffer.from(name);
+    parts.push(Buffer.alloc(4), Buffer.from([8]), value, Buffer.from([title.length]), title);
+  }
+  parts.push(Buffer.from([0]));
+  const escaped = Buffer.from([...Buffer.concat(parts)].flatMap((byte) => byte === 0 ? [1, 2] : byte === 1 ? [1, 1] : byte === 255 ? [1, 3] : [byte]));
+  return Buffer.concat([Buffer.from([255,255,255,255,69,1,0,1,1,0]), escaped, Buffer.from([0])]);
+}
+
+test('required mods preserve server order and full-width Workshop IDs', () => {
+  const mods = [{ id: '9007199254740993', name: 'Framework' }, { id: '1234', name: 'Content' }];
+  const decoded = parseDayZRules(modRules(mods.map((mod) => [mod.id, mod.name])));
+  assert.deepEqual(decoded.mods, mods);
+  assert.equal(decoded.modsComplete, true);
+  assert.deepEqual(matchServerMods(decoded.mods, [{ id: '1234', path: 'local' }, { id: '999', path: 'extra' }]), [
+    { ...mods[0], installed: false }, { ...mods[1], installed: true },
+  ]);
+});
+
+test('empty complete lists allow vanilla; truncated lists and unpublished mods are incomplete', () => {
+  assert.deepEqual(parseDayZRules(modRules([])).mods, []);
+  assert.equal(parseDayZRules(modRules([])).modsComplete, true);
+  assert.equal(parseDayZRules(modRules([['1234', 'Mod']], 1)).modsComplete, false);
+  assert.equal(parseDayZRules(modRules([['0', 'Local mod']])).modsComplete, false);
+  assert.throws(() => parseDayZSignatures(modRules([], 2)), /truncated/);
 });
