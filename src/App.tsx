@@ -55,6 +55,7 @@ function App() {
   const [addingServer, setAddingServer] = useState(false);
   const [hideFull, setHideFull] = useState(false);
   const [hideEmpty, setHideEmpty] = useState(false);
+  const [hideLocked, setHideLocked] = useState(false);
   const [secureOnly, setSecureOnly] = useState(false);
   const [maxPing, setMaxPing] = useState(2500);
   const activeServerScan = useRef('');
@@ -79,6 +80,7 @@ function App() {
       && (serverMap === 'all' || server.map.toLowerCase() === serverMap.toLowerCase())
       && (!hideFull || server.players < server.maxPlayers)
       && (!hideEmpty || server.players > 0)
+      && (!hideLocked || !server.password)
       && (!secureOnly || server.vac)
       && (maxPing >= 2500 || (server.ping !== null && server.ping <= maxPing));
   }).sort((left, right) => {
@@ -86,7 +88,7 @@ function App() {
     if (serverSort === 'name') return left.name.localeCompare(right.name);
     if (serverSort === 'map') return left.map.localeCompare(right.map) || right.players - left.players;
     return right.players - left.players || (left.ping ?? Number.MAX_SAFE_INTEGER) - (right.ping ?? Number.MAX_SAFE_INTEGER);
-  }), [hideEmpty, hideFull, maxPing, secureOnly, serverMap, serverCategory, serverResults, deferredServerSearch, serverSort]);
+  }), [hideEmpty, hideFull, hideLocked, maxPing, secureOnly, serverMap, serverCategory, serverResults, deferredServerSearch, serverSort]);
   const firstVisibleRow = Math.max(0, Math.min(Math.floor(serverScrollTop / 61) - 5, visibleServers.length - 30));
   const renderedServers = visibleServers.slice(firstVisibleRow, firstVisibleRow + 30);
   const selectedServer = visibleServers.find((server) => server.address === selectedServerAddress);
@@ -100,7 +102,7 @@ function App() {
   useEffect(() => {
     setServerScrollTop(0);
     serverRowsRef.current?.scrollTo(0, 0);
-  }, [serverScope, deferredServerSearch, serverMap, serverCategory, serverSort, hideFull, hideEmpty, secureOnly, maxPing]);
+  }, [serverScope, deferredServerSearch, serverMap, serverCategory, serverSort, hideFull, hideEmpty, hideLocked, secureOnly, maxPing]);
 
   async function refresh() {
     setWorking(true);
@@ -429,6 +431,7 @@ function App() {
             <label className="map-filter"><MapIcon size={15} /><select aria-label="Filter by map" value={serverMap} onChange={(event) => setServerMap(event.target.value)}><option value="all">All maps</option>{serverMaps.map((mapName) => <option key={mapName} value={mapName}>{mapName}</option>)}</select><ChevronDown size={13} /></label>
             <label className="server-check"><input type="checkbox" checked={hideFull} onChange={(event) => setHideFull(event.target.checked)} /><span />Hide full</label>
             <label className="server-check"><input type="checkbox" checked={hideEmpty} onChange={(event) => setHideEmpty(event.target.checked)} /><span />Hide empty</label>
+            <label className="server-check"><input type="checkbox" checked={hideLocked} onChange={(event) => setHideLocked(event.target.checked)} /><span />Hide locked</label>
             <label className="server-check"><input type="checkbox" checked={secureOnly} onChange={(event) => setSecureOnly(event.target.checked)} /><span />VAC secure</label>
             <label className="ping-filter"><Signal size={14} /><span>MAX PING <strong>{maxPing >= 2500 ? 'ANY' : `${maxPing} ms`}</strong></span><input type="range" min="50" max="2500" step="50" value={maxPing} onChange={(event) => setMaxPing(Number(event.target.value))} /></label>
             <label className="sort-filter"><Filter size={13} /><select aria-label="Sort servers" value={serverSort} onChange={(event) => setServerSort(event.target.value as typeof serverSort)}><option value="players">Players</option><option value="ping">Ping</option><option value="name">Name</option><option value="map">Map</option></select></label>
