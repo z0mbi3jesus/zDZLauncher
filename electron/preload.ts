@@ -41,6 +41,7 @@ contextBridge.exposeInMainWorld('dayz', {
     ipcRenderer.on('servers:progress', handler);
     return () => ipcRenderer.removeListener('servers:progress', handler);
   },
+  setServerModId: (address: string, name: string, id: string): Promise<void> => ipcRenderer.invoke('servers:set-mod-id', { address, name, id }),
   serverMods: (address: string): Promise<ServerModMatch[]> => ipcRenderer.invoke('servers:mods', address),
   joinServer: (server: DayZServer, modIds: string[], password?: string): Promise<boolean> => ipcRenderer.invoke('servers:join', {
     host: server.host,

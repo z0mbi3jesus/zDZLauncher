@@ -3,13 +3,14 @@ import { execFileSync, spawn } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getLogFile, initializeLogger, log } from './logger.js';
-import { parseServerAddress, queryAddressCandidates, queryServerMods, matchServerMods, scanServers, type DayZServer } from './server-browser.js';
+import { parseServerAddress, queryAddressCandidates, queryServerMods, resolveServerModIds, matchServerMods, scanServers, type DayZServer } from './server-browser.js';
 import { closeSteamDiscovery } from './steam-discovery.js';
 
 interface Settings {
   gamePath: string;
   favoriteServers?: string[];
   recentServers?: string[];
+  serverModIds?: Record<string, Record<string, string>>;
 }
 
 interface LaunchRequest {
@@ -278,7 +279,8 @@ ipcMain.handle('servers:add-manual', async (_event, address: string) => {
 ipcMain.handle('servers:mods', async (_event, address: string) => {
   log('INFO', 'Checking server-required mods.', { address });
   try {
-    const required = await queryServerMods(address, true);
+    const parsed = parseServerAddress(address);
+    const required = resolveServerModIds(await queryServerMods(parsed.address, true), readSettings().serverModIds?.[parsed.address]);
     const matched = matchServerMods(required, scanMods().mods);
     log('INFO', 'Server mods matched.', { address, required: matched.length, missing: matched.filter((mod) => !mod.installed).length });
     return matched;
@@ -286,6 +288,17 @@ ipcMain.handle('servers:mods', async (_event, address: string) => {
     log('WARN', 'Server mod query failed.', { address, error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
+});
+
+ipcMain.handle('servers:set-mod-id', async (_event, request: { address: string; name: string; id: string }) => {
+  const { address } = parseServerAddress(request.address);
+  if (!/^[1-9]\d{0,19}$/.test(request.id)) throw new Error('Enter a numeric Workshop item ID.');
+  const required = await queryServerMods(address, true);
+  if (!required.some((mod) => mod.id === '0' && mod.name === request.name)) throw new Error('This mod no longer needs a Workshop ID. Recheck the server.');
+  const settings = readSettings();
+  const serverModIds = { ...settings.serverModIds, [address]: { ...settings.serverModIds?.[address], [request.name]: request.id } };
+  writeSettings({ ...settings, serverModIds });
+  log('INFO', 'Saved server Workshop ID mapping.', { address, name: request.name, id: request.id });
 });
 
 ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
@@ -299,7 +312,8 @@ ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
   const executable = gameExecutable(readSettings());
   if (!executable || !existsSync(executable)) throw new Error('DayZ was not found. Set the game path in Settings.');
   const installedMods = new Map(scanMods().mods.map((mod) => [mod.id, mod.path]));
-  const required = await queryServerMods(parsed.address);
+  const required = resolveServerModIds(await queryServerMods(parsed.address, true), readSettings().serverModIds?.[parsed.address]);
+  if (required.some((mod) => mod.id === '0')) throw new Error('Assign Workshop IDs to the unresolved mods before joining.');
   const missing = required.filter((mod) => !installedMods.has(mod.id));
   if (missing.length) throw new Error(`Install the required Workshop mods before joining: ${missing.map((mod) => mod.name).join(', ')}`);
   const modPaths = required.map((mod) => installedMods.get(mod.id)!);

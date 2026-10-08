@@ -237,6 +237,17 @@ function App() {
     return () => { cancelled = true; };
   }, [selectedServerAddress, modCheckVersion]);
 
+  async function assignServerModId(mod: ServerModMatch, address: string) {
+    const entered = window.prompt(`Workshop ID or item link for ${mod.name}. Use the server's mod list to confirm the correct item.`);
+    if (!entered) return;
+    const id = entered.trim().match(/^[1-9]\d{0,19}$/)?.[0] ?? entered.match(/[?&]id=([1-9]\d{0,19})(?:&|$)/)?.[1];
+    if (!id) { setNotice('Enter a Workshop item ID or its Steam Workshop link.'); return; }
+    try {
+      await window.dayz.setServerModId(address, mod.name, id);
+      setModCheckVersion((value) => value + 1);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not save the Workshop ID.'); }
+  }
+
   async function joinServer(server: DayZServer) {
     if (!status.gameFound) {
       setNotice('Set the DayZ installation path in Settings before joining.');
@@ -468,11 +479,11 @@ function App() {
                   {selectedServer.tags.length > 0 && <div className="server-tags">{selectedServer.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}</div>}
                   <h3 className="server-mod-heading">SERVER MODS</h3>
                   <div className="join-mod-note" role="status"><Gamepad2 size={15} /><span>{serverModsLoading ? 'Checking required mods...' : serverModsError || (serverModList.length ? `${serverModList.filter((mod) => mod.installed).length}/${serverModList.length} required mods installed. Server loadout is applied automatically.` : 'No mods required. Joining with a vanilla loadout.')}</span></div>
-                  <div className="server-required-mods">{serverModList.map((mod, index) => <div key={`${mod.id}-${index}`}><span>{mod.id === '0' ? 'Workshop ID unavailable: ' : mod.installed ? 'Installed: ' : 'Missing: '}{mod.name}</span><button className="text-button" disabled={mod.id === '0'} onClick={() => void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.id === '0' ? 'UNRESOLVED' : mod.installed ? 'WORKSHOP' : 'GET MOD'}</button></div>)}</div>
+                  <div className="server-required-mods">{serverModList.map((mod, index) => <div key={`${mod.id}-${index}`}><span>{mod.id === '0' ? 'Workshop ID unavailable: ' : mod.installed ? 'Installed: ' : 'Missing: '}{mod.name}{mod.id !== '0' && <small className="server-mod-id">Workshop {mod.id}</small>}</span><button className="text-button" onClick={() => mod.id === '0' ? void assignServerModId(mod, selectedServer.address) : void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.id === '0' ? 'SET ID' : mod.installed ? 'WORKSHOP' : 'GET MOD'}</button></div>)}</div>
                   <button className="text-button" disabled={serverModsLoading} onClick={() => setModCheckVersion((value) => value + 1)}>RECHECK MODS</button>
                   <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || serverLoading || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => !mod.installed)}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
                   {!status.gameFound && <small className="join-blocked">Set the DayZ game path in Settings to enable joining.</small>}
-                  {status.gameFound && <small className="join-blocked" role="status">{serverLoading ? 'Wait for the server scan to finish, or press Stop, to join.' : serverModsLoading ? 'Checking the server mod list before joining.' : serverModsError ? 'Joining is unavailable until the mod query succeeds. Use Recheck Mods to retry.' : serverModList.some((mod) => mod.id === '0') ? 'This server does not advertise Workshop IDs for all its mods. Automatic matching is unavailable.' : serverModList.some((mod) => !mod.installed) ? 'Subscribe to the missing mods using Get Mod, wait for Steam downloads, then Recheck Mods.' : 'Ready to join with the server loadout.'}</small>}
+                  {status.gameFound && <small className="join-blocked" role="status">{serverLoading ? 'Wait for the server scan to finish, or press Stop, to join.' : serverModsLoading ? 'Checking the server mod list before joining.' : serverModsError ? 'Joining is unavailable until the mod query succeeds. Use Recheck Mods to retry.' : serverModList.some((mod) => mod.id === '0') ? 'This server omits Workshop IDs. Use Set ID with the correct Workshop item link to match those mods.' : serverModList.some((mod) => !mod.installed) ? 'Subscribe to the missing mods using Get Mod, wait for Steam downloads, then Recheck Mods.' : 'Ready to join with the server loadout.'}</small>}
                 </div>
               </> : <div className="server-detail-empty"><Signal size={25} /><strong>SELECT A SERVER</strong><span>Server details, security and quick join appear here.</span></div>}
             </aside>

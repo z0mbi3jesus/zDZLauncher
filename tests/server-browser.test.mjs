@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSocket } from 'node:dgram';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { resolveServerModIds, queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
 test('a cancelled internet scan does not initialize Steam or publish results', async () => {
   const controller = new AbortController();
@@ -182,4 +182,12 @@ test('mod query keeps the challenge socket and assembles out-of-order split repl
   try {
     assert.deepEqual(await queryServerMods(`127.0.0.1:${socket.address().port}`), [{ id: '1234', name: 'Live fixture' }]);
   } finally { socket.close(); }
+});
+
+test('explicit Workshop mappings resolve only omitted IDs and preserve server order', () => {
+  const required = [{ id: '0', name: '@CF' }, { id: '222', name: 'Content' }, { id: '0', name: 'Unknown' }];
+  assert.deepEqual(resolveServerModIds(required, { '@CF': '1559212036', Content: '999', Unknown: 'invalid' }), [
+    { id: '1559212036', name: '@CF' }, required[1], required[2],
+  ]);
+  assert.deepEqual(resolveServerModIds(required), required);
 });

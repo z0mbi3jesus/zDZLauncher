@@ -8,3 +8,7 @@
 .server-required-mods > div { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 0; }
 
 .server-mod-heading { margin: 14px 0 8px; font: 10px var(--mono); color: #c7d1bf; }
+
+.server-mod-id { display: block; margin-top: 3px; color: #829087; font-size: 9px; }
+.server-required-mods > div > span { overflow-wrap: anywhere; min-width: 0; }
+.server-required-mods button { flex-shrink: 0; }

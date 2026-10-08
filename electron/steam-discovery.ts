@@ -74,7 +74,10 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
     const client = steam;
     const allocations: unknown[] = [];
     const handles: unknown[] = [];
-    const addRequest = (filters: Array<[string, string]>) => {
+    const requestFilters: Array<Array<[string, string]>> = [];
+    const pendingFilters: Array<Array<[string, string]>> = [];
+    const addRequest = (filters: Array<[string, string]>) => pendingFilters.push(filters);
+    const startRequest = (filters: Array<[string, string]>) => {
       const pointers = filters.map(([name, value]) => {
         const pointer = koffi.alloc('uint8_t', 512);
         const buffer = Buffer.alloc(512);
@@ -84,18 +87,28 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
         allocations.push(pointer);
         return pointer;
       });
-      const handle = client.request(client.api, DAYZ_APP_ID, pointers.length ? pointers : null, pointers.length, null);
+      const table = pointers.length ? koffi.alloc('void *', pointers.length) : null;
+      if (table) {
+        koffi.encode(table, 'void *', pointers, pointers.length);
+        allocations.push(table);
+      }
+      const handle = client.request(client.api, DAYZ_APP_ID, table, pointers.length, null);
       if (!handle) throw new Error('Steam did not create a server-list request.');
       handles.push(handle);
+      requestFilters.push(filters);
     };
     const started = Date.now();
     let servers: DayZServer[] = [];
     let lastProgress = 0;
+
     try {
       // Steam limits individual result sets. Merge complementary partitions
       // using supported Steamworks filters, plus official candidates, rather than taking the
       // first worldwide result set as a complete directory.
+      // Query official shards directly so a capped general result set cannot crowd them out.
+      addRequest([['gametagsnor', 'privHive']]);
       addRequest([]);
+      addRequest([['gametagsand', 'shard000']]);
       for (const population of ['hasplayers', 'noplayers']) {
         for (const modded of [true, false]) {
           for (const firstPerson of [true, false]) {
@@ -104,9 +117,13 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
         }
       }
       addRequest([['gametagsnor', 'external']]);
+      let launchedAt = Date.now();
+      startRequest(pendingFilters.shift()!);
       while (true) {
         client.callbacks();
-        const active = handles.some((handle) => client.refreshing(client.api, handle));
+        const states = handles.map((handle) => client.refreshing(client.api, handle));
+        const counts = handles.map((handle) => client.count(client.api, handle));
+        const active = states.some(Boolean);
         if (Date.now() - lastProgress >= 1000 || !active) {
           const unique = new Map<string, DayZServer>();
           for (const handle of handles) {
@@ -123,7 +140,19 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
           progress({ total: servers.length, complete: servers.filter((server) => server.lastSeen > 0).length, servers });
           lastProgress = Date.now();
         }
-        if (!active || signal?.aborted) break;
+        if (signal?.aborted) break;
+        const currentCount = counts[counts.length - 1] ?? 0;
+        // Steam keeps pinging a capped list long after directory entries arrive.
+        // Give complementary requests time within the shared scan deadline.
+        if (pendingFilters.length && Date.now() - launchedAt >= (currentCount >= STEAM_RESULT_LIMIT ? 5000 : 15000)) {
+          client.cancel(client.api, handles[handles.length - 1]);
+        }
+        if (!active && Date.now() - launchedAt >= (currentCount ? 1000 : 5000)) {
+          const nextFilters = pendingFilters.shift();
+          if (!nextFilters) break;
+          startRequest(nextFilters);
+          launchedAt = Date.now();
+        }
         if (Date.now() - started >= REFRESH_TIMEOUT_MS) {
           log('WARN', 'Steam refresh reached 90 seconds; retaining available listings.', { count: servers.length });
           break;
@@ -131,7 +160,8 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
         await new Promise((resolve) => setTimeout(resolve, 100));
       }
       if (!servers.length) throw new Error('Steam returned no DayZ servers. Check Steam connectivity, then retry.');
-      log('INFO', 'Steam server discovery finished.', { count: servers.length });
+      log('INFO', 'Steam server discovery finished.', { count: servers.length, officialCandidates: servers.filter((server) => isOfficialCandidate(server.tags)).length });
+      handles.forEach((handle, index) => log('INFO', 'Steam request results.', { filters: requestFilters[index], count: client.count(client.api, handle) }));
       if (handles.some((handle) => client.count(client.api, handle) >= STEAM_RESULT_LIMIT)) log('WARN', 'A Steam partition reached its result limit; complete coverage is not guaranteed.');
       return servers;
     } finally {

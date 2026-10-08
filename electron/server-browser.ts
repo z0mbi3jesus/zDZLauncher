@@ -269,6 +269,11 @@ export function parseDayZSignatures(packet: Buffer): string[] {
   return rules.signatures;
 }
 
+export function resolveServerModIds(required: ServerMod[], overrides: Record<string, string> = {}): ServerMod[] {
+  return required.map((mod) => mod.id === '0' && /^[1-9]\d{0,19}$/.test(overrides[mod.name] ?? '')
+    ? { ...mod, id: overrides[mod.name] } : mod);
+}
+
 export function matchServerMods(required: ServerMod[], installed: { id: string; path: string }[]) {
   const local = new Map(installed.map((mod) => [mod.id, mod.path]));
   return required.map((mod) => ({ ...mod, installed: local.has(mod.id) }));
