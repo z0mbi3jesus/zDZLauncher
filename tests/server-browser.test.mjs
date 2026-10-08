@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createSocket } from 'node:dgram';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
 test('a cancelled internet scan does not initialize Steam or publish results', async () => {
   const controller = new AbortController();
@@ -153,4 +154,32 @@ test('empty complete lists allow vanilla; truncated lists and unpublished mods a
   assert.equal(parseDayZRules(modRules([['1234', 'Mod']], 1)).modsComplete, false);
   assert.equal(parseDayZRules(modRules([['0', 'Local mod']])).modsComplete, false);
   assert.throws(() => parseDayZSignatures(modRules([], 2)), /truncated/);
+});
+
+test('mod query keeps the challenge socket and assembles out-of-order split replies', async () => {
+  const socket = createSocket('udp4');
+  await new Promise((resolve) => socket.bind(0, '127.0.0.1', resolve));
+  let firstPort;
+  const packet = modRules([['1234', 'Live fixture']]);
+  socket.on('message', (request, remote) => {
+    if (request.readInt32LE(5) === -1) {
+      firstPort = remote.port;
+      socket.send(Buffer.from([255,255,255,255,65,42,0,0,0]), remote.port, remote.address);
+      return;
+    }
+    if (remote.port !== firstPort || request.readInt32LE(5) !== 42) return;
+    const middle = Math.floor(packet.length / 2);
+    for (const index of [1, 0]) {
+      const header = Buffer.alloc(12);
+      header.writeInt32LE(-2, 0);
+      header.writeUInt32LE(77, 4);
+      header[8] = 2;
+      header[9] = index;
+      header.writeUInt16LE(1248, 10);
+      socket.send(Buffer.concat([header, index ? packet.subarray(middle) : packet.subarray(0, middle)]), remote.port, remote.address);
+    }
+  });
+  try {
+    assert.deepEqual(await queryServerMods(`127.0.0.1:${socket.address().port}`), [{ id: '1234', name: 'Live fixture' }]);
+  } finally { socket.close(); }
 });

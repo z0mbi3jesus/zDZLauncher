@@ -276,8 +276,16 @@ ipcMain.handle('servers:add-manual', async (_event, address: string) => {
 });
 
 ipcMain.handle('servers:mods', async (_event, address: string) => {
-  const required = await queryServerMods(address);
-  return matchServerMods(required, scanMods().mods);
+  log('INFO', 'Checking server-required mods.', { address });
+  try {
+    const required = await queryServerMods(address, true);
+    const matched = matchServerMods(required, scanMods().mods);
+    log('INFO', 'Server mods matched.', { address, required: matched.length, missing: matched.filter((mod) => !mod.installed).length });
+    return matched;
+  } catch (error) {
+    log('WARN', 'Server mod query failed.', { address, error: error instanceof Error ? error.message : String(error) });
+    throw error;
+  }
 });
 
 ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {

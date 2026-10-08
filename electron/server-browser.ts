@@ -120,7 +120,35 @@ function udpRequest(host: string, port: number, request: Buffer, timeout = QUERY
       socket.close();
       reject(error);
     });
-    socket.once('message', (packet, remote) => {
+    let challenges = 0;
+    let splitId: number | undefined;
+    let splitCount = 0;
+    const pieces = new Map<number, Buffer>();
+    socket.on('message', (packet, remote) => {
+      if (remote.address !== host || remote.port !== port) return;
+      if (packet.length >= 9 && packet.readInt32LE(0) === -1 && packet[4] === 0x41 && challenges++ < 2) {
+        const challenged = request[4] === 0x56
+          ? Buffer.concat([request.subarray(0, 5), packet.subarray(5, 9)])
+          : Buffer.concat([infoRequest(), packet.subarray(5, 9)]);
+        socket.send(challenged, port, host);
+        return;
+      }
+      if (packet.length >= 12 && packet.readInt32LE(0) === -2) {
+        const id = packet.readUInt32LE(4);
+        const count = packet[8];
+        const index = packet[9];
+        if (id & 0x80000000 || !count || count > 64 || index >= count || (splitId !== undefined && (splitId !== id || splitCount !== count))) {
+          clearTimeout(timer);
+          socket.close();
+          reject(new Error('Unsupported or invalid split server response.'));
+          return;
+        }
+        splitId = id;
+        splitCount = count;
+        pieces.set(index, packet.subarray(12));
+        if (pieces.size !== count) return;
+        packet = Buffer.concat(Array.from({ length: count }, (_, number) => pieces.get(number)!));
+      }
       clearTimeout(timer);
       socket.close();
       resolve({ packet, remote });
@@ -170,7 +198,7 @@ export function queryAddressCandidates(input: string): string[] {
 
 export interface ServerMod { id: string; name: string; }
 
-export function parseDayZRules(packet: Buffer): { mods: ServerMod[]; signatures: string[]; modsComplete: boolean; signaturesComplete: boolean } {
+export function parseDayZRules(packet: Buffer): { mods: ServerMod[]; signatures: string[]; modsComplete: boolean; signaturesComplete: boolean; modsTruncated: boolean } {
   if (packet.length < 7 || packet.readInt32LE(0) !== -1 || packet[4] !== 0x45) throw new Error('Unexpected DayZ rules response.');
   let offset = 7;
   const fragments = new Map<number, Buffer>();
@@ -232,7 +260,7 @@ export function parseDayZRules(packet: Buffer): { mods: ServerMod[]; signatures:
   const signatures: string[] = [];
   const count = byte();
   for (let index = 0; index < count; index++) signatures.push(take(byte()).toString('utf8'));
-  return { mods, signatures, signaturesComplete: !(flags & 2), modsComplete: !(flags & 1) && mods.every((mod) => mod.id !== '0') };
+  return { mods, signatures, modsTruncated: Boolean(flags & 1), signaturesComplete: !(flags & 2), modsComplete: !(flags & 1) && mods.every((mod) => mod.id !== '0') };
 }
 
 export function parseDayZSignatures(packet: Buffer): string[] {
@@ -246,7 +274,7 @@ export function matchServerMods(required: ServerMod[], installed: { id: string; 
   return required.map((mod) => ({ ...mod, installed: local.has(mod.id) }));
 }
 
-export async function queryServerMods(address: string): Promise<ServerMod[]> {
+export async function queryServerMods(address: string, preview = false): Promise<ServerMod[]> {
   const { host, port } = parseServerAddress(address);
   const resolved = (await lookup(host, { family: host.includes(':') ? 6 : 4 })).address;
   let response = await udpRequest(resolved, port, Buffer.from([255, 255, 255, 255, 86, 255, 255, 255, 255]), 4000);
@@ -254,7 +282,8 @@ export async function queryServerMods(address: string): Promise<ServerMod[]> {
     response = await udpRequest(resolved, port, Buffer.concat([Buffer.from([255, 255, 255, 255, 86]), response.packet.subarray(5, 9)]), 4000);
   }
   const rules = parseDayZRules(response.packet);
-  if (!rules.modsComplete) throw new Error('The server returned an incomplete mod list. Cannot safely prepare its loadout.');
+  if (rules.modsTruncated) throw new Error('The server returned an incomplete mod list. Cannot safely prepare its loadout.');
+  if (!preview && rules.mods.some((mod) => mod.id === '0')) throw new Error('The server does not publish Workshop IDs for its mods. Automatic matching is unavailable.');
   return rules.mods;
 }
 
