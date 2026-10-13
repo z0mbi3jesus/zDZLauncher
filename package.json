@@ -53,8 +53,12 @@
       "README.md"
     ],
     "win": {
-      "target": "nsis"
+      "target": "nsis",
+      "icon": "assets/branding/launcher.ico"
     },
+    "extraResources": [
+      { "from": "assets/branding/launcher.ico", "to": "launcher.ico" }
+    ],
     "extraFiles": [
       {
         "from": "LICENSE",
@@ -78,7 +82,14 @@
       }
     ],
     "nsis": {
-      "license": "LICENSE"
+      "license": "LICENSE",
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": "always",
+      "createStartMenuShortcut": true,
+      "installerIcon": "assets/branding/launcher.ico",
+      "uninstallerIcon": "assets/branding/launcher.ico",
+      "installerHeaderIcon": "assets/branding/launcher.ico"
     },
     "artifactName": "z0mbi3-DayZ-Launcher-${version}-${arch}-${target}.${ext}"
   },

@@ -5,3 +5,4 @@
 button.profile-chip{background:transparent;border-top:0;border-right:0;border-bottom:0;padding-right:0}.profile-avatar{overflow:hidden;flex-shrink:0}.settings-section select{margin-left:10px;padding:7px;background:#171d19;border:1px solid #384338;color:#d5dad2}
 
 .brand-name{margin-top:12px;color:#d5dad2;font-size:15px;line-height:1.35;overflow-wrap:anywhere}
+.brand-logo{display:block;width:144px;height:144px;object-fit:contain;align-self:center}

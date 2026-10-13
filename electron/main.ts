@@ -141,6 +141,7 @@ function createWindow() {
     minHeight: 680,
     backgroundColor: '#111513',
     title: "z0mbi3's DayZ Launcher",
+    icon: app.isPackaged ? path.join(process.resourcesPath, 'launcher.ico') : path.join(app.getAppPath(), 'assets/branding/launcher.ico'),
     webPreferences: {
       preload: path.join(import.meta.dirname, 'preload.js'),
       contextIsolation: true,

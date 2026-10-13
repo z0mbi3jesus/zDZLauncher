@@ -1,4 +1,5 @@
 import { startTransition, useDeferredValue, useEffect, useMemo, useRef, useState } from 'react';
+import launcherLogo from '../assets/branding/launcher.png';
 import {
   ArrowDown, ArrowUp, Check, ChevronDown, CircleHelp, Copy, Download, Filter,
   FolderOpen, Gamepad2, Globe2, Heart, History, LayoutDashboard, ListFilter, LoaderCircle,
@@ -376,7 +377,7 @@ function App() {
   return (
     <main className="app-shell">
       <aside className="rail">
-        <div className="brand-mark"><span> DZ </span></div>
+        <img className="brand-logo" src={launcherLogo} alt="z0mbi3's DayZ Launcher" draggable={false} />
         <div className="brand-name">z0mbi3's DayZ Launcher</div>
         <div className="rail-label">FIELD KIT</div>
         <nav aria-label="Main navigation">
