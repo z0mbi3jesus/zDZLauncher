@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createSocket } from 'node:dgram';
 import { generateKeyPairSync, sign } from 'node:crypto';
-import { resolveServerModIds, queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
+import { dayZLaunchCommand, playerLaunchArgs, selectedPlayerProfile, installWorkshopMods, workshopReady, resolveServerModIds, queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
 test('a cancelled internet scan does not initialize Steam or publish results', async () => {
   const controller = new AbortController();
@@ -190,4 +190,81 @@ test('explicit Workshop mappings resolve only omitted IDs and preserve server or
     { id: '1559212036', name: '@CF' }, required[1], required[2],
   ]);
   assert.deepEqual(resolveServerModIds(required), required);
+});
+
+test('Workshop readiness excludes pending, downloading and outdated installed items', () => {
+  assert.equal(workshopReady(5), true);
+  for (const state of [0, 1, 4 | 8, 4 | 16, 4 | 32]) assert.equal(workshopReady(state), false);
+});
+
+test('Workshop installation subscribes once per item and waits for actual installation', async () => {
+  const subscribed = [];
+  let tick = 0;
+  const updates = [];
+  const folders = await installWorkshopMods([{ id: '123', name: 'Framework' }, { id: '123', name: 'Duplicate' }, { id: '456', name: 'Content' }], {
+    subscribe: async (id) => subscribed.push(id),
+    state: (id) => id === '456' ? 5 : tick === 0 ? 0 : tick < 2 ? 1 | 4 | 8 | 16 : 5,
+    folder: (id) => `installed/${id}`,
+    pump: () => tick++,
+  }, (value) => updates.push(value), undefined, { wait: async () => {} });
+  assert.deepEqual(subscribed, ['123']);
+  assert.equal(folders.get('123'), 'installed/123');
+  assert.equal(updates[0].stage, 'subscribing');
+  assert.ok(updates.some((value) => value.stage === 'downloading' && value.complete === 1));
+  assert.equal(updates.at(-1).stage, 'ready');
+});
+
+test('Workshop cancellation never returns a launchable loadout', async () => {
+  const controller = new AbortController();
+  await assert.rejects(installWorkshopMods([{ id: '123', name: 'Mod' }], {
+    subscribe: async () => {}, state: () => 1 | 32, folder: () => 'partial', pump: () => {},
+  }, () => controller.abort(), controller.signal, { wait: async () => {} }), /cancelled/);
+});
+
+test('invalid IDs, failed subscriptions and stalled downloads prevent readiness', async () => {
+  const client = { subscribe: async () => { throw new Error('Steam refused'); }, state: () => 0, folder: () => undefined, pump: () => {} };
+  await assert.rejects(installWorkshopMods([{ id: '0', name: 'Unresolved' }], client, () => {}), /Resolve/);
+  await assert.rejects(installWorkshopMods([{ id: '123', name: 'Private' }], client, () => {}), /Steam refused/);
+  await assert.rejects(installWorkshopMods([{ id: '123', name: 'Stalled' }], { ...client, state: () => 1 }, () => {}, undefined, { timeoutMs: -1 }), /Timed out/);
+});
+
+test('download completion callback is required before using an installed item', async () => {
+  let tick = 0;
+  let folderReads = 0;
+  const downloaded = [];
+  await installWorkshopMods([{ id: '123', name: 'Mod' }], {
+    subscribe: async () => {}, state: () => tick === 0 ? 1 | 8 : 5,
+    download: (id) => downloaded.push(id), downloadResult: () => tick < 2 ? undefined : 1,
+    folder: () => { assert.ok(tick >= 2); folderReads++; return 'complete'; }, pump: () => tick++,
+  }, () => {}, undefined, { wait: async () => {} });
+  assert.deepEqual(downloaded, ['123']);
+  assert.equal(folderReads, 1);
+});
+
+test('Steam download failures stop preparation before file access', async () => {
+  await assert.rejects(installWorkshopMods([{ id: '123', name: 'Mod' }], {
+    subscribe: async () => {}, state: () => 1 | 8,
+    download: () => {}, downloadResult: () => 9,
+    folder: () => { throw new Error('Must not inspect failed downloads'); }, pump: () => {},
+  }, () => {}, undefined, { wait: async () => {} }), /Steam download failed/);
+});
+
+test('DayZ launch uses existing player profiles and refuses ambiguous or missing selections', () => {
+  const profiles = [{ name: 'Survivor One', file: 'existing/one' }];
+  assert.deepEqual(playerLaunchArgs(profiles), ['-name=Survivor One']);
+  assert.deepEqual(playerLaunchArgs([]), []);
+  assert.throws(() => playerLaunchArgs(profiles, 'missing'), /Choose an existing/);
+  const multiple = [...profiles, { name: 'Two', file: 'existing/two' }];
+  assert.throws(() => playerLaunchArgs(multiple), /Choose an existing/);
+  assert.deepEqual(playerLaunchArgs(multiple, 'Two'), ['-name=Two']);
+  assert.equal(selectedPlayerProfile(multiple, 'Two').file, 'existing/two');
+  assert.throws(() => playerLaunchArgs([{ name: 'Bad\nname', file: 'existing' }]), /safely/);
+});
+
+test('BattlEye bootstrap receives the game executable and separate profile/server/mod arguments', () => {
+  const args = ['-name=Survivor One', '-connect=127.0.0.1', '-port=2302', '-mod=one;two'];
+  const launch = dayZLaunchCommand('DayZ/DayZ_x64.exe', args);
+  assert.ok(launch.executable.endsWith('DayZ_BE.exe'));
+  assert.deepEqual(launch.args, ['-exe', 'DayZ_x64.exe', ...args]);
+  assert.deepEqual(args, ['-name=Survivor One', '-connect=127.0.0.1', '-port=2302', '-mod=one;two']);
 });

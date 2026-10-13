@@ -1,3 +1,5 @@
+export { detectPlayerProfiles, selectedPlayerProfile, playerLaunchArgs, dayZLaunchCommand } from './player-profile.js';
+export { installWorkshopMods, workshopReady } from './workshop.js';
 import { createSocket, type RemoteInfo } from 'node:dgram';
 import { lookup } from 'node:dns/promises';
 import { createPublicKey, verify, type KeyObject } from 'node:crypto';
@@ -386,9 +388,34 @@ export async function scanServers(
 ): Promise<DayZServer[]> {
   writeLog('INFO', 'Starting server scan.', { scope, savedCount: savedAddresses.length });
   if (scope === 'internet') {
-    const servers = await discoverSteamServers(gameExecutable, onProgress, writeLog, signal);
-    await verifyOfficialCandidates(servers, onProgress, writeLog, signal);
-    return servers.sort((left, right) => right.players - left.players);
+    let latest: DayZServer[] = [];
+    const verified = new Map<string, DayZServer>();
+    const queued = new Set<string>();
+    let verification = Promise.resolve();
+    const mergeVerified = () => latest.map((server) => verified.get(server.address) ?? server);
+    const publishVerification = () => {
+      if (!signal?.aborted) onProgress({ total: latest.length, complete: latest.filter((server) => server.lastSeen > 0).length, servers: mergeVerified() });
+    };
+    const servers = await discoverSteamServers(gameExecutable, (progress) => {
+      latest = progress.servers;
+      onProgress({ ...progress, servers: mergeVerified() });
+      const candidates = latest.filter((server) => isOfficialCandidate(server.tags) && !queued.has(server.address));
+      if (!candidates.length) return;
+      candidates.forEach((server) => queued.add(server.address));
+      // Start verification while Steam is still discovering, so Stop retains
+      // already verified official servers rather than an entirely unverified list.
+      verification = verification.then(async () => {
+        await verifyOfficialCandidates(candidates, () => {
+          candidates.filter((server) => server.category === 'official').forEach((server) => verified.set(server.address, server));
+          publishVerification();
+        }, writeLog, signal);
+        candidates.filter((server) => server.category === 'official').forEach((server) => verified.set(server.address, server));
+        publishVerification();
+      }).catch((error) => writeLog('WARN', 'Official-server verification failed.', error));
+    }, writeLog, signal);
+    latest = servers;
+    await verification;
+    return mergeVerified().sort((left, right) => right.players - left.players);
   }
   const addresses = savedAddresses.map((address) => parseServerAddress(address));
   const candidates = addresses;

@@ -1,3 +1,4 @@
+import { deflateSync } from 'node:zlib';
 import koffi from 'koffi';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
@@ -38,6 +39,10 @@ export function parseSteamServer(record: Buffer): DayZServer {
 
 let steam: ReturnType<typeof createSteam> | undefined;
 let scanQueue: Promise<unknown> = Promise.resolve();
+const workshopCleanups = new Set<() => void>();
+const workshopRun = koffi.proto('void WorkshopRun(void *, void *)');
+const workshopRunResult = koffi.proto('void WorkshopRunResult(void *, void *, bool, uint64_t)');
+const workshopSize = koffi.proto('int WorkshopSize(void *)');
 
 function createSteam(gameExecutable: string) {
   const dllPath = path.join(path.dirname(gameExecutable), 'steam_api64.dll');
@@ -51,6 +56,7 @@ function createSteam(gameExecutable: string) {
   if (!api) throw new Error('The installed Steam API does not expose server discovery. Verify the DayZ installation in Steam.');
   return {
     api,
+    library,
     request: library.func('void *SteamAPI_ISteamMatchmakingServers_RequestInternetServerList(void *, uint32_t, void **, uint32_t, void *)'),
     count: library.func('int SteamAPI_ISteamMatchmakingServers_GetServerCount(void *, void *)'),
     details: library.func('void *SteamAPI_ISteamMatchmakingServers_GetServerDetails(void *, void *, int)'),
@@ -62,7 +68,143 @@ function createSteam(gameExecutable: string) {
   };
 }
 
+export interface SteamPlayer { id: string; name: string; avatar: string; ownsDayZ: boolean; }
+
+function pngImage(width: number, height: number, rgba: Buffer): string {
+  const crc = (buffer: Buffer) => {
+    let value = 0xffffffff;
+    for (const byte of buffer) {
+      value ^= byte;
+      for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+    }
+    return (value ^ 0xffffffff) >>> 0;
+  };
+  const chunk = (type: string, bytes: Buffer) => {
+    const data = Buffer.concat([Buffer.from(type), bytes]);
+    const length = Buffer.alloc(4); length.writeUInt32BE(bytes.length);
+    const checksum = Buffer.alloc(4); checksum.writeUInt32BE(crc(data));
+    return Buffer.concat([length, data, checksum]);
+  };
+  const header = Buffer.alloc(13); header.writeUInt32BE(width); header.writeUInt32BE(height, 4); header[8] = 8; header[9] = 6;
+  const rows = Buffer.concat(Array.from({ length: height }, (_, row) => Buffer.concat([Buffer.from([0]), rgba.subarray(row * width * 4, (row + 1) * width * 4)])));
+  return 'data:image/png;base64,' + Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), chunk('IHDR', header), chunk('IDAT', deflateSync(rows)), chunk('IEND', Buffer.alloc(0))]).toString('base64');
+}
+
+export function steamPlayer(gameExecutable: string): SteamPlayer {
+  steam ??= createSteam(gameExecutable);
+  const { library } = steam;
+  const handle = library.func('int SteamAPI_GetHSteamUser()')();
+  const find = library.func('void *SteamInternal_FindOrCreateUserInterface(int, const char *)');
+  const user = find(handle, 'SteamUser023');
+  const friends = find(handle, 'SteamFriends017');
+  const apps = find(handle, 'STEAMAPPS_INTERFACE_VERSION008');
+  const utils = library.func('void *SteamAPI_SteamUtils_v010()')();
+  if (!user || !friends || !apps || !utils) throw new Error('Steam player information is unavailable. Verify the DayZ installation.');
+  if (!library.func('bool SteamAPI_ISteamUser_BLoggedOn(void *)')(user)) throw new Error('Sign in to Steam before launching DayZ.');
+  steam.callbacks();
+  const id = BigInt(library.func('uint64_t SteamAPI_ISteamUser_GetSteamID(void *)')(user)).toString();
+  const name = library.func('const char *SteamAPI_ISteamFriends_GetPersonaName(void *)')(friends) as string;
+  const ownsDayZ = Boolean(library.func('bool SteamAPI_ISteamApps_BIsSubscribedApp(void *, uint32_t)')(apps, DAYZ_APP_ID));
+  let avatar = '';
+  try {
+    const image = library.func('int SteamAPI_ISteamFriends_GetSmallFriendAvatar(void *, uint64_t)')(friends, BigInt(id));
+    const width = Buffer.alloc(4), height = Buffer.alloc(4);
+    if (image > 0 && library.func('bool SteamAPI_ISteamUtils_GetImageSize(void *, int, void *, void *)')(utils, image, width, height)) {
+      const w = width.readUInt32LE(), h = height.readUInt32LE();
+      if (w && h && w <= 256 && h <= 256) {
+        const rgba = Buffer.alloc(w * h * 4);
+        if (library.func('bool SteamAPI_ISteamUtils_GetImageRGBA(void *, int, void *, int)')(utils, image, rgba, rgba.length)) avatar = pngImage(w, h, rgba);
+      }
+    }
+  } catch { /* A missing or not-yet-loaded avatar must not block the player identity. */ }
+  return { id, name, avatar, ownsDayZ };
+}
+
+export function workshopClient(gameExecutable: string) {
+  steam ??= createSteam(gameExecutable);
+  const client = steam;
+  const library = client.library;
+  let ugc: unknown;
+  for (const version of ['021', '020', '019', '018', '017', '016', '015']) {
+    try { ugc = library.func(`void *SteamAPI_SteamUGC_v${version}()`)(); if (ugc) break; } catch { /* Try the installed SDK's interface version. */ }
+  }
+  if (!ugc) throw new Error('The installed DayZ Steam API does not support Workshop downloads. Verify DayZ in Steam.');
+  const utils = library.func('void *SteamAPI_SteamUtils_v010()')();
+  const subscribe = library.func('uint64_t SteamAPI_ISteamUGC_SubscribeItem(void *, uint64_t)');
+  const download = library.func('bool SteamAPI_ISteamUGC_DownloadItem(void *, uint64_t, bool)');
+  const register = library.func('void SteamAPI_RegisterCallback(void *, int)');
+  const unregister = library.func('void SteamAPI_UnregisterCallback(void *)');
+  const downloads = new Map<string, number>();
+  const onDownload = (payload: unknown) => {
+    const data = Buffer.from(koffi.decode(payload, 'uint8_t', 24));
+    if (data.readUInt32LE(0) === DAYZ_APP_ID) downloads.set(data.readBigUInt64LE(8).toString(), data.readInt32LE(16));
+  };
+  // Windows x64 CCallbackBase: vtable pointer, flags byte, padding, callback ID.
+  const functions = [
+    koffi.register((_self: unknown, payload: unknown) => onDownload(payload), koffi.pointer(workshopRun)),
+    koffi.register((_self: unknown, payload: unknown, failed: boolean) => { if (!failed) onDownload(payload); }, koffi.pointer(workshopRunResult)),
+    koffi.register(() => 24, koffi.pointer(workshopSize)),
+  ];
+  const vtable = koffi.alloc('void *', 3);
+  // MSVC reverses the two overloaded Run slots in this exported Windows ABI.
+  koffi.encode(vtable, 'void *', [functions[1], functions[0], functions[2]], 3);
+  const callback = koffi.alloc('uint8_t', 16);
+  const callbackData = Buffer.alloc(16);
+  callbackData.writeInt32LE(3406, 12);
+  koffi.encode(callback, 'uint8_t', [...callbackData], 16);
+  koffi.encode(callback, 'void *', vtable);
+  register(callback, 3406); // DownloadItemResult_t.
+  let disposed = false;
+  const dispose = () => {
+    if (disposed) return;
+    disposed = true;
+    unregister(callback);
+    functions.forEach((fn) => koffi.unregister(fn));
+    koffi.free(callback);
+    koffi.free(vtable);
+    workshopCleanups.delete(dispose);
+  };
+  workshopCleanups.add(dispose);
+  const state = library.func('uint32_t SteamAPI_ISteamUGC_GetItemState(void *, uint64_t)');
+  const install = library.func('bool SteamAPI_ISteamUGC_GetItemInstallInfo(void *, uint64_t, void *, void *, uint32_t, void *)');
+  const completed = library.func('bool SteamAPI_ISteamUtils_IsAPICallCompleted(void *, uint64_t, void *)');
+  const result = library.func('bool SteamAPI_ISteamUtils_GetAPICallResult(void *, uint64_t, void *, int, int, void *)');
+  return {
+    dispose,
+    download: (id: string) => {
+      downloads.delete(id);
+      if (!download(ugc, BigInt(id), false)) throw new Error(`Steam could not start downloading Workshop item ${id}. Check Steam connectivity.`);
+    },
+    downloadResult: (id: string) => downloads.get(id),
+    pump: () => client.callbacks(),
+    state: (id: string) => Number(state(ugc, BigInt(id))),
+    folder: (id: string): string | undefined => {
+      const folder = Buffer.alloc(4096);
+      if (!install(ugc, BigInt(id), Buffer.alloc(8), folder, folder.length, Buffer.alloc(4))) return;
+      const value = folder.toString('utf8').split('\0')[0];
+      return value && existsSync(value) ? value : undefined;
+    },
+    subscribe: async (id: string) => {
+      const handle = subscribe(ugc, BigInt(id));
+      if (!handle || BigInt(handle) === 0n) throw new Error(`Steam could not subscribe to Workshop item ${id}.`);
+      const failed = Buffer.alloc(1);
+      const deadline = Date.now() + 30000;
+      while (!completed(utils, handle, failed)) {
+        if (Date.now() > deadline) throw new Error(`Steam subscription timed out for ${id}. Check Steam connectivity.`);
+        client.callbacks();
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+      const payload = Buffer.alloc(16);
+      // RemoteStorageSubscribePublishedFileResult_t (1313), native Windows x64 alignment.
+      if (failed[0] || !result(utils, handle, payload, payload.length, 1313, failed) || failed[0] || payload.readInt32LE(0) !== 1 || payload.readBigUInt64LE(8) !== BigInt(id)) {
+        throw new Error(`Steam refused Workshop item ${id} (result ${payload.readInt32LE(0)}). It may be private, deleted, or unavailable.`);
+      }
+    },
+  };
+}
+
 export function closeSteamDiscovery() {
+  [...workshopCleanups].forEach((dispose) => dispose());
   if (steam) steam.shutdown();
   steam = undefined;
 }

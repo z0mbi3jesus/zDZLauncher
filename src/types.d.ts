@@ -1,8 +1,10 @@
-import type { AppStatus, DayZServer, ServerScanProgress, ServerScope, WorkshopMod, ServerModMatch } from '../electron/preload';
+import type { AppStatus, DayZServer, ServerScanProgress, ServerScope, WorkshopMod, ServerModMatch, WorkshopProgress, PlayerStatus } from '../electron/preload';
 
 declare global {
   interface Window {
     dayz: {
+      playerStatus: () => Promise<PlayerStatus>;
+      selectPlayerProfile: (name: string) => Promise<void>;
       status: () => Promise<AppStatus>;
       chooseGame: () => Promise<string>;
       launch: (mods: WorkshopMod[]) => Promise<boolean>;
@@ -16,6 +18,9 @@ declare global {
       searchServers: (id: string, scope: ServerScope) => Promise<DayZServer[]>;
       cancelServerSearch: (id: string) => Promise<void>;
       onServerProgress: (listener: (progress: ServerScanProgress) => void) => () => void;
+      getServerMods: (address: string) => Promise<boolean>;
+      cancelModPreparation: () => Promise<void>;
+      onWorkshopProgress: (listener: (progress: WorkshopProgress) => void) => () => void;
       setServerModId: (address: string, name: string, id: string) => Promise<void>;
       serverMods: (address: string) => Promise<ServerModMatch[]>;
       joinServer: (server: DayZServer, modIds: string[], password?: string) => Promise<boolean>;

@@ -4,10 +4,13 @@ import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from '
 import path from 'node:path';
 import { getLogFile, initializeLogger, log } from './logger.js';
 import { parseServerAddress, queryAddressCandidates, queryServerMods, resolveServerModIds, matchServerMods, scanServers, type DayZServer } from './server-browser.js';
-import { closeSteamDiscovery } from './steam-discovery.js';
+import { detectPlayerProfiles, selectedPlayerProfile, playerLaunchArgs, dayZLaunchCommand } from './player-profile.js';
+import { installWorkshopMods, type WorkshopProgress } from './workshop.js';
+import { steamPlayer, workshopClient, closeSteamDiscovery } from './steam-discovery.js';
 
 interface Settings {
   gamePath: string;
+  playerProfiles?: Record<string, string>;
   favoriteServers?: string[];
   recentServers?: string[];
   serverModIds?: Record<string, Record<string, string>>;
@@ -146,6 +149,37 @@ function createWindow() {
   window.webContents.on('render-process-gone', (_event, details) => log('ERROR', 'Renderer process exited.', details));
 }
 
+function playerContext(executable: string) {
+  const player = steamPlayer(executable);
+  if (!player.ownsDayZ) throw new Error('The signed-in Steam account does not have access to DayZ.');
+  const directory = path.join(app.getPath('documents'), 'DayZ');
+  const profiles = detectPlayerProfiles(directory);
+  const selected = readSettings().playerProfiles?.[player.id];
+  const profile = selectedPlayerProfile(profiles, selected);
+  return { player, profiles, profile, selected, directory };
+}
+
+ipcMain.handle('player:status', () => {
+  const executable = gameExecutable(readSettings());
+  const directory = path.join(app.getPath('documents'), 'DayZ');
+  try { return { ...playerContext(executable), error: '' }; }
+  catch (error) { return { player: null, profiles: detectPlayerProfiles(directory), profile: null, directory, error: error instanceof Error ? error.message : 'Player information unavailable.' }; }
+});
+ipcMain.handle('player:select', (_event, name: string) => {
+  const context = playerContext(gameExecutable(readSettings()));
+  if (!context.profiles.some((profile) => profile.name === name)) throw new Error('Choose an existing DayZ player profile.');
+  const settings = readSettings();
+  writeSettings({ ...settings, playerProfiles: { ...settings.playerProfiles, [context.player.id]: name } });
+});
+
+async function spawnGame(executable: string, args: string[]) {
+  const command = dayZLaunchCommand(executable, args);
+  if (!existsSync(command.executable)) throw new Error('DayZ BattlEye launcher is missing. Verify the game files in Steam before launching.');
+  const child = spawn(command.executable, command.args, { cwd: path.dirname(executable), detached: true, stdio: 'ignore' });
+  await new Promise<void>((resolve, reject) => { child.once('spawn', resolve); child.once('error', reject); });
+  child.unref();
+}
+
 ipcMain.handle('app:status', () => {
   const settings = readSettings();
   const executable = gameExecutable(settings);
@@ -174,11 +208,10 @@ ipcMain.handle('app:launch', async (_event, request: LaunchRequest) => {
   if (!executable || !existsSync(executable)) throw new Error('DayZ was not found. Set the game path in Settings.');
   const installedMods = new Map(scanMods().mods.map((mod) => [mod.id, mod.path]));
   const paths = request.modIds.map((id) => installedMods.get(id)).filter((modPath): modPath is string => Boolean(modPath));
-  const args = paths.length ? [`-mod=${paths.join(';')}`] : [];
+  const context = playerContext(executable);
+  const args = [...playerLaunchArgs(context.profiles, context.selected), ...(paths.length ? [`-mod=${paths.join(';')}`] : [])];
   log('INFO', 'Launching DayZ with active profile mods.', { executable, modCount: paths.length });
-  const child = spawn(executable, args, { cwd: path.dirname(executable), detached: true, stdio: 'ignore' });
-  child.once('error', (error) => log('ERROR', 'Unable to launch DayZ.', error));
-  child.unref();
+  await spawnGame(executable, args);
   return true;
 });
 
@@ -215,7 +248,10 @@ const serverSearches = new Map<number, { id: string; controller: AbortController
 
 ipcMain.handle('servers:cancel', (event, id: string) => {
   const search = serverSearches.get(event.sender.id);
-  if (search?.id === id) search.controller.abort();
+  if (search?.id === id) {
+    log('INFO', 'Server scan cancelled.', { id });
+    search.controller.abort();
+  }
 });
 
 ipcMain.handle('servers:search', async (event, request: { id: string; scope: 'internet' | 'favorites' | 'history' }) => {
@@ -301,7 +337,54 @@ ipcMain.handle('servers:set-mod-id', async (_event, request: { address: string; 
   log('INFO', 'Saved server Workshop ID mapping.', { address, name: request.name, id: request.id });
 });
 
-ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
+const modPreparations = new Map<number, AbortController>();
+
+async function withModPreparation<T>(event: Electron.IpcMainInvokeEvent, work: (signal: AbortSignal) => Promise<T>): Promise<T> {
+  if (modPreparations.has(event.sender.id)) throw new Error('A mod preparation is already running. Cancel or wait for it to finish.');
+  const controller = new AbortController();
+  modPreparations.set(event.sender.id, controller);
+  const cancel = () => controller.abort();
+  event.sender.once('destroyed', cancel);
+  try { return await work(controller.signal); }
+  finally { event.sender.removeListener('destroyed', cancel); modPreparations.delete(event.sender.id); }
+}
+
+async function prepareServerMods(event: Electron.IpcMainInvokeEvent, address: string, executable: string, signal: AbortSignal) {
+  const required = resolveServerModIds(await queryServerMods(address, true), readSettings().serverModIds?.[address]);
+  if (signal.aborted) throw new Error('Mod preparation cancelled.');
+  if (required.some((mod) => mod.id === '0')) throw new Error('Assign Workshop IDs to unresolved mods before downloading.');
+  log('INFO', 'Preparing server Workshop mods.', { address, count: required.length });
+  let folders = new Map<string, string>();
+  if (required.length) {
+    const client = workshopClient(executable);
+    try {
+      folders = await installWorkshopMods(required, client, (progress) => {
+        if (!signal.aborted && !event.sender.isDestroyed()) event.sender.send('workshop:progress', { address, ...progress } satisfies WorkshopProgress);
+      }, signal);
+    } finally { client.dispose(); }
+  }
+  // Recheck the server after downloads, which can take a long time.
+  const current = resolveServerModIds(await queryServerMods(address, true), readSettings().serverModIds?.[address]);
+  if (signal.aborted) throw new Error('Mod preparation cancelled.');
+  if (JSON.stringify(current.map((mod) => mod.id)) !== JSON.stringify(required.map((mod) => mod.id))) throw new Error('The server changed its mod list during download. Click Join again to prepare the new loadout.');
+  for (const mod of required) {
+    const folder = folders.get(mod.id)!;
+    if (!existsSync(path.join(folder, 'addons')) && !existsSync(path.join(folder, 'Addons'))) throw new Error(`${mod.name} has no usable DayZ addons. Check the Workshop ID and retry.`);
+  }
+  log('INFO', 'Server Workshop mods ready.', { address, count: required.length });
+  return required.map((mod) => folders.get(mod.id)!);
+}
+
+ipcMain.handle('workshop:cancel', (event) => { modPreparations.get(event.sender.id)?.abort(); });
+ipcMain.handle('servers:get-mods', (event, address: string) => withModPreparation(event, async (signal) => {
+  const parsed = parseServerAddress(address);
+  const executable = gameExecutable(readSettings());
+  if (!executable || !existsSync(executable)) throw new Error('Set the DayZ installation path in Settings.');
+  await prepareServerMods(event, parsed.address, executable, signal);
+  return true;
+}));
+
+ipcMain.handle('servers:join', async (event, request: JoinRequest) => withModPreparation(event, async (signal) => {
   const host = request.host.includes(':') ? `[${request.host}]` : request.host;
   const parsed = parseServerAddress(`${host}:${request.queryPort}`);
   if (!Number.isInteger(request.gamePort) || request.gamePort < 1 || request.gamePort > 65535) {
@@ -311,25 +394,24 @@ ipcMain.handle('servers:join', async (_event, request: JoinRequest) => {
   if (password.length > 64 || /[\0\r\n]/.test(password)) throw new Error('The server password is invalid.');
   const executable = gameExecutable(readSettings());
   if (!executable || !existsSync(executable)) throw new Error('DayZ was not found. Set the game path in Settings.');
-  const installedMods = new Map(scanMods().mods.map((mod) => [mod.id, mod.path]));
-  const required = resolveServerModIds(await queryServerMods(parsed.address, true), readSettings().serverModIds?.[parsed.address]);
-  if (required.some((mod) => mod.id === '0')) throw new Error('Assign Workshop IDs to the unresolved mods before joining.');
-  const missing = required.filter((mod) => !installedMods.has(mod.id));
-  if (missing.length) throw new Error(`Install the required Workshop mods before joining: ${missing.map((mod) => mod.name).join(', ')}`);
-  const modPaths = required.map((mod) => installedMods.get(mod.id)!);
-  const args = [`-connect=${parsed.host}`, `-port=${request.gamePort}`];
+  const initialPlayer = playerContext(executable);
+  const profileArgs = playerLaunchArgs(initialPlayer.profiles, initialPlayer.selected);
+  const modPaths = await prepareServerMods(event, parsed.address, executable, signal);
+  const currentPlayer = playerContext(executable);
+  if (JSON.stringify(playerLaunchArgs(currentPlayer.profiles, currentPlayer.selected)) !== JSON.stringify(profileArgs)) throw new Error('The selected DayZ profile changed during preparation. Click Join again to use the new profile.');
+  if (currentPlayer.player.id !== initialPlayer.player.id) throw new Error('The Steam account changed during preparation. Click Join again for the current account.');
+  if (signal.aborted) throw new Error('Mod preparation cancelled.');
+  const args = [...profileArgs, `-connect=${parsed.host}`, `-port=${request.gamePort}`];
   if (password) args.push(`-password=${password}`);
   if (modPaths.length) args.push(`-mod=${modPaths.join(';')}`);
   log('INFO', 'Joining DayZ server.', { address: parsed.address, gamePort: request.gamePort, modCount: modPaths.length, passwordProtected: Boolean(password) });
-  const child = spawn(executable, args, { cwd: path.dirname(executable), detached: true, stdio: 'ignore' });
-  child.once('error', (error) => log('ERROR', 'Unable to join DayZ server.', error));
-  child.unref();
+  await spawnGame(executable, args);
 
   const settings = readSettings();
   const recent = [parsed.address, ...(settings.recentServers ?? []).filter((item) => item !== parsed.address)].slice(0, 50);
   writeSettings({ ...settings, recentServers: recent });
   return true;
-});
+}));
 
 app.whenReady().then(() => {
   const logFile = initializeLogger(app.getPath('userData'));

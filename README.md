@@ -1,5 +1,9 @@
 # DZ Launchpad
 
+Created and maintained by z0mbi3jesus
+Contact Info: hutton@6thlevel.net | z0mbi3.g.sus@gmail.com
+Website: 6thlevel.netSS
+
 A Windows-first DayZ desktop launcher and local Steam Workshop mod manager built with Electron, React, and TypeScript.
 
 ## Features

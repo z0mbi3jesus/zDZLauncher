@@ -6,7 +6,7 @@ import {
   Settings2, ShieldCheck, Signal, SlidersHorizontal, Sparkles, Star, Users,
   Wrench, X,
 } from 'lucide-react';
-import type { AppStatus, DayZServer, ServerScope, WorkshopMod, ServerModMatch } from '../electron/preload';
+import type { AppStatus, DayZServer, ServerScope, WorkshopMod, ServerModMatch, WorkshopProgress, PlayerStatus } from '../electron/preload';
 
 type Page = 'launch' | 'servers' | 'mods' | 'profiles' | 'settings';
 type StoredProfile = { id: string; name: string; modIds: string[] };
@@ -24,6 +24,7 @@ function loadProfiles(): StoredProfile[] {
 }
 
 function App() {
+  const [playerStatus, setPlayerStatus] = useState<PlayerStatus | null>(null);
   const [page, setPage] = useState<Page>('launch');
   const [status, setStatus] = useState<AppStatus>({ gamePath: '', gameFound: false, workshopPath: '', mods: [] });
   const [profiles, setProfiles] = useState<StoredProfile[]>(loadProfiles);
@@ -39,6 +40,9 @@ function App() {
   const [serverModsError, setServerModsError] = useState('');
   const [modCheckVersion, setModCheckVersion] = useState(0);
   const joining = useRef(false);
+  const [modJobAddress, setModJobAddress] = useState('');
+  const [workshopProgress, setWorkshopProgress] = useState<WorkshopProgress | null>(null);
+  useEffect(() => window.dayz.onWorkshopProgress(setWorkshopProgress), []);
   const [serverScope, setServerScope] = useState<ServerScope>('internet');
   const [serverResults, setServerResults] = useState<DayZServer[]>([]);
   const [serverFavorites, setServerFavorites] = useState<string[]>([]);
@@ -132,6 +136,17 @@ function App() {
     }
   }
 
+  async function refreshPlayer() {
+    try { setPlayerStatus(await window.dayz.playerStatus()); }
+    catch (error) { setNotice(error instanceof Error ? error.message : 'Could not read Steam player information.'); }
+  }
+  useEffect(() => {
+    void refreshPlayer();
+    const update = () => { void refreshPlayer(); };
+    window.addEventListener('focus', update);
+    const interval = window.setInterval(update, 30000);
+    return () => { window.removeEventListener('focus', update); window.clearInterval(interval); };
+  }, []);
   useEffect(() => { void refresh(); }, []);
 
   useEffect(() => {
@@ -248,6 +263,24 @@ function App() {
     } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not save the Workshop ID.'); }
   }
 
+  async function getAllServerMods(server: DayZServer) {
+    if (joining.current) return;
+    joining.current = true;
+    setModJobAddress(server.address);
+    setWorkshopProgress(null);
+    try {
+      await window.dayz.getServerMods(server.address);
+      setNotice(`All required mods for ${server.name} are installed.`);
+    } catch (error) { setNotice(error instanceof Error ? error.message : 'Could not install server mods.'); }
+    finally {
+      joining.current = false;
+      setModJobAddress('');
+      setWorkshopProgress(null);
+      setModCheckVersion((value) => value + 1);
+      void refresh();
+    }
+  }
+
   async function joinServer(server: DayZServer) {
     if (!status.gameFound) {
       setNotice('Set the DayZ installation path in Settings before joining.');
@@ -257,6 +290,8 @@ function App() {
     const password = server.password ? window.prompt(`Password for ${server.name}`) : undefined;
     if (server.password && password === null) return;
     joining.current = true;
+    setModJobAddress(server.address);
+    setWorkshopProgress(null);
     try {
       setNotice(`Checking required mods for ${server.name}...`);
       await window.dayz.joinServer(server, [], password ?? undefined);
@@ -267,6 +302,10 @@ function App() {
       setModCheckVersion((value) => value + 1);
     } finally {
       joining.current = false;
+      setModJobAddress('');
+      setWorkshopProgress(null);
+      setModCheckVersion((value) => value + 1);
+      void refresh();
     }
   }
 
@@ -365,7 +404,7 @@ function App() {
           <div className="top-actions">
             <button className="icon-button" title="Open Workshop" onClick={() => void window.dayz.openWorkshop()}><Download size={17} /></button>
             <button className="icon-button" title="Refresh mod library" onClick={() => void refresh()}><RefreshCw size={16} className={working ? 'spin' : ''} /></button>
-            <div className="profile-chip"><span className="profile-avatar">{profile?.name.slice(0, 1).toUpperCase() ?? 'S'}</span><span>{profile?.name ?? 'Survivor'}</span><ChevronDown size={14} /></div>
+            <button className="profile-chip" title={playerStatus?.error || `Steam: ${playerStatus?.player?.id ?? 'Checking'} | DayZ: ${playerStatus?.profile?.name ?? 'Default profile'}`} onClick={() => setPage('settings')}><span className="profile-avatar">{playerStatus?.player?.avatar ? <img src={playerStatus.player.avatar} alt="Steam avatar" style={{ width: '100%', height: '100%', objectFit: 'cover' }} /> : playerStatus?.player?.name.slice(0, 1).toUpperCase() ?? '?'}</span><span>{playerStatus?.player?.name ?? (playerStatus?.error ? 'Steam unavailable' : 'Checking Steam...')}</span><ChevronDown size={14} /></button>
           </div>
         </header>
 
@@ -481,9 +520,11 @@ function App() {
                   <div className="join-mod-note" role="status"><Gamepad2 size={15} /><span>{serverModsLoading ? 'Checking required mods...' : serverModsError || (serverModList.length ? `${serverModList.filter((mod) => mod.installed).length}/${serverModList.length} required mods installed. Server loadout is applied automatically.` : 'No mods required. Joining with a vanilla loadout.')}</span></div>
                   <div className="server-required-mods">{serverModList.map((mod, index) => <div key={`${mod.id}-${index}`}><span>{mod.id === '0' ? 'Workshop ID unavailable: ' : mod.installed ? 'Installed: ' : 'Missing: '}{mod.name}{mod.id !== '0' && <small className="server-mod-id">Workshop {mod.id}</small>}</span><button className="text-button" onClick={() => mod.id === '0' ? void assignServerModId(mod, selectedServer.address) : void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.id === '0' ? 'SET ID' : mod.installed ? 'WORKSHOP' : 'GET MOD'}</button></div>)}</div>
                   <button className="text-button" disabled={serverModsLoading} onClick={() => setModCheckVersion((value) => value + 1)}>RECHECK MODS</button>
-                  <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || serverLoading || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => !mod.installed)}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
+                  <button className="text-button" disabled={!status.gameFound || Boolean(modJobAddress) || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => mod.id === '0')} onClick={() => void getAllServerMods(selectedServer)}>GET ALL MODS</button>
+                  {modJobAddress && <div className="join-mod-note" role="status"><span>{workshopProgress ? `${workshopProgress.complete}/${workshopProgress.total} mods ready. ${workshopProgress.stage === 'subscribing' ? 'Subscribing to' : 'Waiting for Steam to install'} ${workshopProgress.name}` : 'Preparing server mods...'}{modJobAddress !== selectedServer.address && ' (for the previously selected server)'}</span><button className="text-button" onClick={() => void window.dayz.cancelModPreparation()}>CANCEL</button></div>}
+                  <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || Boolean(modJobAddress) || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => mod.id === '0')}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
                   {!status.gameFound && <small className="join-blocked">Set the DayZ game path in Settings to enable joining.</small>}
-                  {status.gameFound && <small className="join-blocked" role="status">{serverLoading ? 'Wait for the server scan to finish, or press Stop, to join.' : serverModsLoading ? 'Checking the server mod list before joining.' : serverModsError ? 'Joining is unavailable until the mod query succeeds. Use Recheck Mods to retry.' : serverModList.some((mod) => mod.id === '0') ? 'This server omits Workshop IDs. Use Set ID with the correct Workshop item link to match those mods.' : serverModList.some((mod) => !mod.installed) ? 'Subscribe to the missing mods using Get Mod, wait for Steam downloads, then Recheck Mods.' : 'Ready to join with the server loadout.'}</small>}
+                  {status.gameFound && <small className="join-blocked" role="status">{modJobAddress ? 'Steam is preparing the loadout. Cancel stops waiting and prevents automatic launch; queued Steam downloads may continue.' : serverModsLoading ? 'Checking the server mod list before joining.' : serverModsError ? 'Joining is unavailable until the mod query succeeds. Use Recheck Mods to retry.' : serverModList.some((mod) => mod.id === '0') ? 'This server omits Workshop IDs. Use Set ID with the correct Workshop item link to match those mods.' : serverModList.some((mod) => !mod.installed) ? 'Join downloads missing mods through Steam and connects when they are ready. Get All Mods downloads without launching.' : 'Ready to join with the server loadout.'}</small>}
                 </div>
               </> : <div className="server-detail-empty"><Signal size={25} /><strong>SELECT A SERVER</strong><span>Server details, security and quick join appear here.</span></div>}
             </aside>
@@ -515,6 +556,11 @@ function App() {
 
         {page === 'settings' && <div className="page-content settings-page">
           <div className="page-title-row"><div><div className="eyebrow">LOCAL CONFIGURATION</div><h1>Settings<span>.</span></h1><p>Connect DZ Launchpad to your local DayZ install.</p></div></div>
+          <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Users size={18} /></div><div><strong>Steam player and DayZ profile</strong><span>Your signed-in Steam account and existing local DayZ settings</span></div></div>
+            <p>{playerStatus?.player ? `${playerStatus.player.name} — Steam ID ${playerStatus.player.id}` : playerStatus?.error || 'Checking Steam...'}</p>
+            <label className="setting-note">DayZ player profile <select value={playerStatus?.profile?.name ?? ''} onChange={(event) => { const name = event.target.value; if (name) void window.dayz.selectPlayerProfile(name).then(refreshPlayer).catch((error) => setNotice(error.message)); }} disabled={!playerStatus?.player || !playerStatus.profiles.length}><option value="">{playerStatus?.profiles.length ? 'Choose existing profile' : 'DayZ default (no existing profile detected)'}</option>{playerStatus?.profiles.map((item) => <option key={item.file} value={item.name}>{item.name}</option>)}</select></label>
+            <p className="setting-note">{playerStatus?.profile?.file ?? playerStatus?.directory} · Existing settings are retained. Survivor gear and progress are loaded by DayZ when you connect.</p><button className="text-button" onClick={() => void refreshPlayer()}>REFRESH PLAYER</button>
+          </div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Settings2 size={18} /></div><div><strong>Game installation</strong><span>DayZ_x64.exe location</span></div></div><div className="path-box"><div className={`path-state ${status.gameFound ? 'good' : ''}`} /><span title={status.gamePath}>{status.gamePath || 'No DayZ installation selected'}</span><button onClick={async () => { try { await window.dayz.chooseGame(); await refresh(); } catch (error) { setNotice(error instanceof Error ? error.message : 'Invalid game path.'); } }}>BROWSE <FolderOpen size={14} /></button></div><p className="setting-note">The launcher searches standard Steam library folders automatically. You can select your DayZ directory or its executable.</p></div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Download size={18} /></div><div><strong>Workshop library</strong><span>Steam-managed local content</span></div></div><div className="path-box"><div className={`path-state ${status.workshopPath ? 'good' : ''}`} /><span title={status.workshopPath}>{status.workshopPath || 'Workshop content folder not detected'}</span><button disabled={!status.workshopPath} onClick={() => void window.dayz.openFolder(status.workshopPath)}>OPEN <FolderOpen size={14} /></button></div><p className="setting-note">Subscriptions and downloads are managed by Steam. Subscribe to DayZ items in the Workshop, then refresh the library here.</p></div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Wrench size={18} /></div><div><strong>Runtime diagnostics</strong><span>Startup, server discovery, and launch events</span></div></div><div className="path-box"><div className="path-state good" /><span title={runtimeLogPath}>{runtimeLogPath || 'Log path is being initialized'}</span><button disabled={!runtimeLogPath} onClick={() => void window.dayz.openLog()}>OPEN LOG <FolderOpen size={14} /></button></div><p className="setting-note">The active log is capped at 2 MB; the previous log is kept as one backup. Server passwords are never written to the log.</p></div>
