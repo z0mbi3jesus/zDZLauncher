@@ -1,0 +1,77 @@
+z0mbi3's DayZ Launcher Community License v1.0
+Effective: October 13, 2026
+Copyright (c) 2026 z0mbi3jesus. All rights reserved except as granted below.
+
+1. Scope and ownership
+This license covers only the original z0mbi3's DayZ Launcher code, documentation, and
+assets owned by z0mbi3jesus (the Author). Third-party components, games, mods,
+services, and trademarks retain their own owners and applicable licenses.
+This is a custom proprietary, free-to-use license, not an open-source license.
+
+2. Free use and sharing
+Anyone may download, install, run, copy, and back up z0mbi3's DayZ Launcher free of
+charge. Use is permitted by individuals and organizations, including players
+of monetized servers, subject to applicable third-party terms.
+You may freely share unmodified copies of the original source or official
+release packages as a standalone product, provided that:
+- recipients are not charged for the software, access to it, or its delivery;
+- the original name, author attribution, copyright and license notices, terms,
+  privacy policy, and third-party notices are preserved;
+- you do not claim authorship, official status, or endorsement; and
+- you do not add advertisements, tracking, malware, or other payloads.
+Sharing a download link is allowed. Ordinary archive compression or copying
+the complete official release does not itself constitute prohibited bundling.
+Private modifications and local builds for your own use are allowed; public
+redistribution of modified versions requires the Author's written permission.
+
+3. Permission required
+Unless section 4 applies or the Author gives prior written permission, you
+may not sell, rent, commercially license, or otherwise profit from distributing
+z0mbi3's DayZ Launcher or copies or derivatives of its original implementation. You may
+not make access conditional on a payment, purchase, or donation.
+You may not rebrand it as your own work, remove its attribution, or incorporate
+its original code or assets into another distributed product.
+Bundling, preinstalling, or distributing it with another game, application,
+product, service package, modpack, or paid offering requires written permission,
+even when the bundle itself is free. This restriction concerns z0mbi3's DayZ Launcher's
+original work only; it does not restrict independently licensed dependencies.
+This license does not give the Author ownership of the idea of a launcher,
+general techniques, public protocols, or independently developed competing tools.
+
+4. Bohemia Interactive and Valve exception
+Bohemia Interactive a.s. and Valve Corporation may use, copy, modify,
+redistribute, and bundle the Author's original z0mbi3's DayZ Launcher work with their
+products and services, including commercial offerings, without seeking
+additional permission. They must preserve the original copyright and author
+attribution and respect third-party licenses. They may identify their own
+modifications without claiming authorship of the original work.
+DayZ, Steam, and Steam Workshop are products/services, not separate licensees;
+this exception is granted to the two named legal entities. It does not extend
+automatically to unrelated publishers, mod authors, server hosts, or resellers.
+This grant does not imply acceptance, affiliation, sponsorship, endorsement,
+or reciprocal permission to use those entities' intellectual property or APIs.
+
+5. Third-party rights and lawful exceptions
+No rights to DayZ, Steam, Steam Workshop, BattlEye, Workshop mods, or other
+third-party intellectual property are granted here. Their terms remain separate.
+Nothing here restricts rights granted by third-party licenses or rights that
+applicable law does not permit this license to restrict.
+
+6. Warranty and liability
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE ORIGINAL SOFTWARE IS
+PROVIDED "AS IS" AND "AS AVAILABLE", WITHOUT WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, OR NON-INFRINGEMENT. THE AUTHOR DOES NOT
+GUARANTEE DOWNLOADS, SERVICE AVAILABILITY, ANTI-CHEAT COMPATIBILITY, SERVER
+ADMISSION, OR RESTORATION OF A PARTICULAR SURVIVOR.
+TO THE MAXIMUM EXTENT PERMITTED BY APPLICABLE LAW, THE AUTHOR IS NOT LIABLE
+FOR LOSS OF DATA, PROGRESS, PROFITS, OR INDIRECT OR CONSEQUENTIAL DAMAGES
+ARISING FROM USE OF THE SOFTWARE. THIS DOES NOT EXCLUDE LIABILITY THAT CANNOT
+LAWFULLY BE EXCLUDED OR LIMIT NON-WAIVABLE CONSUMER RIGHTS.
+
+7. Breach and permission requests
+A material breach of this license terminates the permissions it grants to the
+person in breach. Independently licensed third-party rights remain unaffected.
+An unenforceable provision does not invalidate the remaining provisions.
+Additional permissions must be given in writing by the Author.
+Contact: hutton@6thlevel.net or z0mbi3.g.sus@gmail.com
+Project website: https://6thlevel.net

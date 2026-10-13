@@ -3,8 +3,8 @@ export { installWorkshopMods, workshopReady } from './workshop.js';
 import { createSocket, type RemoteInfo } from 'node:dgram';
 import { lookup } from 'node:dns/promises';
 import { createPublicKey, verify, type KeyObject } from 'node:crypto';
-import { discoverSteamServers, isOfficialCandidate, serverCategory } from './steam-discovery.js';
-export { closeSteamDiscovery, parseSteamServer } from './steam-discovery.js';
+import { discoverSteamServers, isOfficialCandidate, serverCategory, querySteamRules } from './steam-discovery.js';
+export { querySteamRules, closeSteamDiscovery, parseSteamServer } from './steam-discovery.js';
 
 export interface DayZServer {
   address: string;
@@ -113,55 +113,48 @@ export function parseInfo(packet: Buffer, host: string, queryPort: number, ping:
 function udpRequest(host: string, port: number, request: Buffer, timeout = QUERY_TIMEOUT_MS): Promise<{ packet: Buffer; remote: RemoteInfo }> {
   return new Promise((resolve, reject) => {
     const socket = createSocket(host.includes(':') ? 'udp6' : 'udp4');
-    const timer = setTimeout(() => {
-      socket.close();
-      reject(new Error('Server query timed out.'));
-    }, timeout);
-    socket.once('error', (error) => {
-      clearTimeout(timer);
-      socket.close();
-      reject(error);
-    });
+    let finished = false, sentChallenge = false;
+    let currentRequest = request;
     let challenges = 0;
     let splitId: number | undefined;
     let splitCount = 0;
     const pieces = new Map<number, Buffer>();
+    const finish = (error?: Error, result?: { packet: Buffer; remote: RemoteInfo }) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer); clearInterval(retry);
+      socket.close();
+      if (error) reject(error); else resolve(result!);
+    };
+    const send = () => socket.send(currentRequest, port, host, (error) => { if (error) finish(error); });
+    const timer = setTimeout(() => finish(new Error(sentChallenge
+      ? `Server answered the query challenge but did not return the requested data (${pieces.size}/${splitCount || '?'} response packets).`
+      : 'Server query timed out without a response.')), timeout);
+    const retry = setInterval(send, Math.max(200, Math.min(1000, Math.floor(timeout / 3))));
+    socket.once('error', (error) => finish(error));
     socket.on('message', (packet, remote) => {
-      if (remote.address !== host || remote.port !== port) return;
-      if (packet.length >= 9 && packet.readInt32LE(0) === -1 && packet[4] === 0x41 && challenges++ < 2) {
-        const challenged = request[4] === 0x56
+      if (finished || remote.address !== host || remote.port !== port) return;
+      if (packet.length >= 9 && packet.readInt32LE(0) === -1 && packet[4] === 0x41) {
+        if (++challenges > 3) { finish(new Error('Server rejected repeated query challenges.')); return; }
+        sentChallenge = true;
+        currentRequest = request[4] === 0x56
           ? Buffer.concat([request.subarray(0, 5), packet.subarray(5, 9)])
           : Buffer.concat([infoRequest(), packet.subarray(5, 9)]);
-        socket.send(challenged, port, host);
-        return;
+        send(); return;
       }
       if (packet.length >= 12 && packet.readInt32LE(0) === -2) {
-        const id = packet.readUInt32LE(4);
-        const count = packet[8];
-        const index = packet[9];
+        const id = packet.readUInt32LE(4), count = packet[8], index = packet[9];
         if (id & 0x80000000 || !count || count > 64 || index >= count || (splitId !== undefined && (splitId !== id || splitCount !== count))) {
-          clearTimeout(timer);
-          socket.close();
-          reject(new Error('Unsupported or invalid split server response.'));
-          return;
+          finish(new Error('Unsupported or invalid split server response.')); return;
         }
-        splitId = id;
-        splitCount = count;
+        splitId = id; splitCount = count;
         pieces.set(index, packet.subarray(12));
         if (pieces.size !== count) return;
         packet = Buffer.concat(Array.from({ length: count }, (_, number) => pieces.get(number)!));
       }
-      clearTimeout(timer);
-      socket.close();
-      resolve({ packet, remote });
+      finish(undefined, { packet, remote });
     });
-    socket.send(request, port, host, (error) => {
-      if (error) {
-        clearTimeout(timer);
-        socket.close();
-        reject(error);
-      }
-    });
+    send();
   });
 }
 
@@ -198,7 +191,44 @@ export function queryAddressCandidates(input: string): string[] {
   return candidates;
 }
 
-export interface ServerMod { id: string; name: string; }
+export interface ServerMod { id: string; name: string; source?: 'dzsa'; }
+
+export function parseDzsaMods(payload: unknown, host: string, port: number): ServerMod[] {
+  const data = payload as { status?: number; result?: { endpoint?: { ip?: string; port?: number }; mods?: Array<{ name?: unknown; steamWorkshopId?: unknown }> } };
+  if (data?.status !== 0 || data.result?.endpoint?.ip !== host || data.result.endpoint.port !== port || !Array.isArray(data.result.mods)) {
+    throw new Error('DZSA returned no matching server mod list.');
+  }
+  if (!data.result.mods.length || data.result.mods.length > 255) throw new Error('DZSA returned an empty or oversized fallback mod list.');
+  const seen = new Set<string>();
+  return data.result.mods.map((mod) => {
+    const value = mod?.steamWorkshopId;
+    if ((typeof value !== 'string' && typeof value !== 'number') || (typeof value === 'number' && !Number.isSafeInteger(value))) throw new Error('DZSA returned an invalid Workshop ID.');
+    const id = String(value);
+    if (!/^[1-9]\d{0,19}$/.test(id) || BigInt(id) > 18446744073709551615n || seen.has(id)) throw new Error('DZSA returned an invalid or duplicate Workshop ID.');
+    seen.add(id);
+    return { id, name: typeof mod.name === 'string' && mod.name.trim() ? mod.name.slice(0, 256) : `Workshop ${id}` };
+  });
+}
+
+async function queryDzsaMods(host: string, port: number): Promise<ServerMod[]> {
+  const response = await fetch(`https://dayzsalauncher.com/api/v1/query/${encodeURIComponent(host)}/${port}`, { signal: AbortSignal.timeout(6000), redirect: 'error' });
+  if (!response.ok) throw new Error(`DZSA mod lookup returned HTTP ${response.status}.`);
+  // Bound remote metadata before parsing it.
+  const reader = response.body?.getReader();
+  if (!reader) throw new Error('DZSA returned no response body.');
+  const chunks: Uint8Array[] = [];
+  let length = 0;
+  try {
+    while (true) {
+      const chunk = await reader.read();
+      if (chunk.done) break;
+      length += chunk.value.length;
+      if (length > 262144) throw new Error('DZSA mod response is too large.');
+      chunks.push(chunk.value);
+    }
+  } finally { await reader.cancel(); }
+  return parseDzsaMods(JSON.parse(Buffer.concat(chunks).toString('utf8')), host, port);
+}
 
 export function parseDayZRules(packet: Buffer): { mods: ServerMod[]; signatures: string[]; modsComplete: boolean; signaturesComplete: boolean; modsTruncated: boolean } {
   if (packet.length < 7 || packet.readInt32LE(0) !== -1 || packet[4] !== 0x45) throw new Error('Unexpected DayZ rules response.');
@@ -281,14 +311,30 @@ export function matchServerMods(required: ServerMod[], installed: { id: string; 
   return required.map((mod) => ({ ...mod, installed: local.has(mod.id) }));
 }
 
-export async function queryServerMods(address: string, preview = false): Promise<ServerMod[]> {
+export async function queryServerMods(address: string, preview = false, gameExecutable = '', writeLog: ServerLog = () => undefined): Promise<ServerMod[]> {
   const { host, port } = parseServerAddress(address);
   const resolved = (await lookup(host, { family: host.includes(':') ? 6 : 4 })).address;
-  let response = await udpRequest(resolved, port, Buffer.from([255, 255, 255, 255, 86, 255, 255, 255, 255]), 4000);
-  if (response.packet.length >= 9 && response.packet.readInt32LE(0) === -1 && response.packet[4] === 0x41) {
-    response = await udpRequest(resolved, port, Buffer.concat([Buffer.from([255, 255, 255, 255, 86]), response.packet.subarray(5, 9)]), 4000);
+  let rules: ReturnType<typeof parseDayZRules>;
+  try {
+    const response = await udpRequest(resolved, port, Buffer.from([255, 255, 255, 255, 86, 255, 255, 255, 255]), 4000);
+    rules = parseDayZRules(response.packet);
+  } catch (directError) {
+    if (!gameExecutable || resolved.includes(':')) throw directError;
+    writeLog('WARN', 'Direct mod query failed; trying Steam rules.', { address, error: directError instanceof Error ? directError.message : String(directError) });
+    try {
+      rules = parseDayZRules(await querySteamRules(gameExecutable, resolved, port));
+      writeLog('INFO', 'Steam rules fallback succeeded.', { address, count: rules.mods.length });
+    } catch (steamError) {
+      writeLog('WARN', 'Steam rules failed; trying DZSA mod metadata.', { address });
+      try {
+        const mods = await queryDzsaMods(resolved, port);
+        writeLog('INFO', 'DZSA mod fallback succeeded; third-party metadata may be cached.', { address, count: mods.length });
+        return mods.map((mod) => ({ ...mod, source: 'dzsa' as const }));
+      } catch (fallbackError) {
+        throw new Error(`Required mods unavailable for ${address}: direct query: ${directError instanceof Error ? directError.message : String(directError)} Steam query: ${steamError instanceof Error ? steamError.message : String(steamError)} DZSA lookup: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)} Use Recheck Mods to retry.`);
+      }
+    }
   }
-  const rules = parseDayZRules(response.packet);
   if (rules.modsTruncated) throw new Error('The server returned an incomplete mod list. Cannot safely prepare its loadout.');
   if (!preview && rules.mods.some((mod) => mod.id === '0')) throw new Error('The server does not publish Workshop IDs for its mods. Automatic matching is unavailable.');
   return rules.mods;

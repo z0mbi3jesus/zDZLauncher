@@ -43,6 +43,8 @@ const workshopCleanups = new Set<() => void>();
 const workshopRun = koffi.proto('void WorkshopRun(void *, void *)');
 const workshopRunResult = koffi.proto('void WorkshopRunResult(void *, void *, bool, uint64_t)');
 const workshopSize = koffi.proto('int WorkshopSize(void *)');
+const rulesReceived = koffi.proto('void RulesReceived(void *, void *, void *)');
+const rulesFinished = koffi.proto('void RulesFinished(void *)');
 
 function createSteam(gameExecutable: string) {
   const dllPath = path.join(path.dirname(gameExecutable), 'steam_api64.dll');
@@ -120,6 +122,59 @@ export function steamPlayer(gameExecutable: string): SteamPlayer {
   return { id, name, avatar, ownsDayZ };
 }
 
+export async function querySteamRules(gameExecutable: string, host: string, port: number): Promise<Buffer> {
+  if (!/^\d+\.\d+\.\d+\.\d+$/.test(host)) throw new Error('Steam rules fallback supports IPv4 servers only.');
+  steam ??= createSteam(gameExecutable);
+  const client = steam;
+  const request = client.library.func('int SteamAPI_ISteamMatchmakingServers_ServerRules(void *, uint32_t, uint16_t, void *)');
+  const cancel = client.library.func('void SteamAPI_ISteamMatchmakingServers_CancelServerQuery(void *, int)');
+  const pairs: Buffer[] = [];
+  let done = false, failure: Error | undefined;
+  const bytes = (pointer: unknown) => {
+    const value: number[] = [];
+    for (let index = 0; index < 65536; index++) {
+      const byte = koffi.decode(pointer, index, 'uint8_t') as number;
+      if (!byte) return Buffer.from(value);
+      value.push(byte);
+    }
+    throw new Error('Steam returned an oversized rules value.');
+  };
+  const callbacks = [
+    koffi.register((_self: unknown, key: unknown, value: unknown) => {
+      try {
+        if (pairs.length >= 4096) throw new Error('Steam returned too many server rules.');
+        pairs.push(Buffer.concat([bytes(key), Buffer.from([0]), bytes(value), Buffer.from([0])]));
+      } catch (error) { failure = error instanceof Error ? error : new Error(String(error)); done = true; }
+    }, koffi.pointer(rulesReceived)),
+    koffi.register(() => { failure = new Error('Steam could not retrieve server rules.'); done = true; }, koffi.pointer(rulesFinished)),
+    koffi.register(() => { done = true; }, koffi.pointer(rulesFinished)),
+  ];
+  const vtable = koffi.alloc('void *', 3);
+  koffi.encode(vtable, 'void *', callbacks, 3);
+  const response = koffi.alloc('void *', 1);
+  koffi.encode(response, 'void *', vtable);
+  let handle = -1;
+  try {
+    const ip = host.split('.').reduce((value, octet) => (value * 256 + Number(octet)) >>> 0, 0);
+    handle = request(client.api, ip, port, response);
+    if (handle === -1) throw new Error('Steam did not start the server rules request.');
+    const deadline = Date.now() + 6000;
+    while (!done && Date.now() < deadline) {
+      client.callbacks();
+      if (!done) await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    if (failure) throw failure;
+    if (!done) throw new Error('Steam server rules query timed out.');
+    const header = Buffer.from([255,255,255,255,69,0,0]);
+    header.writeUInt16LE(pairs.length, 5);
+    return Buffer.concat([header, ...pairs]);
+  } finally {
+    if (handle !== -1) cancel(client.api, handle);
+    callbacks.forEach((callback) => koffi.unregister(callback));
+    koffi.free(response); koffi.free(vtable);
+  }
+}
+
 export function workshopClient(gameExecutable: string) {
   steam ??= createSteam(gameExecutable);
   const client = steam;
@@ -166,6 +221,7 @@ export function workshopClient(gameExecutable: string) {
   };
   workshopCleanups.add(dispose);
   const state = library.func('uint32_t SteamAPI_ISteamUGC_GetItemState(void *, uint64_t)');
+  const downloadInfo = library.func('bool SteamAPI_ISteamUGC_GetItemDownloadInfo(void *, uint64_t, void *, void *)');
   const install = library.func('bool SteamAPI_ISteamUGC_GetItemInstallInfo(void *, uint64_t, void *, void *, uint32_t, void *)');
   const completed = library.func('bool SteamAPI_ISteamUtils_IsAPICallCompleted(void *, uint64_t, void *)');
   const result = library.func('bool SteamAPI_ISteamUtils_GetAPICallResult(void *, uint64_t, void *, int, int, void *)');
@@ -176,6 +232,11 @@ export function workshopClient(gameExecutable: string) {
       if (!download(ugc, BigInt(id), false)) throw new Error(`Steam could not start downloading Workshop item ${id}. Check Steam connectivity.`);
     },
     downloadResult: (id: string) => downloads.get(id),
+    downloadInfo: (id: string) => {
+      const downloaded = Buffer.alloc(8), total = Buffer.alloc(8);
+      if (!downloadInfo(ugc, BigInt(id), downloaded, total)) return undefined;
+      return { downloaded: downloaded.readBigUInt64LE(0), total: total.readBigUInt64LE(0) };
+    },
     pump: () => client.callbacks(),
     state: (id: string) => Number(state(ugc, BigInt(id))),
     folder: (id: string): string | undefined => {
@@ -251,14 +312,8 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
       addRequest([['gametagsnor', 'privHive']]);
       addRequest([]);
       addRequest([['gametagsand', 'shard000']]);
-      for (const population of ['hasplayers', 'noplayers']) {
-        for (const modded of [true, false]) {
-          for (const firstPerson of [true, false]) {
-            addRequest([[population, ''], [modded ? 'gametagsand' : 'gametagsnor', 'mod'], [firstPerson ? 'gametagsand' : 'gametagsnor', 'no3rd']]);
-          }
-        }
-      }
       addRequest([['gametagsnor', 'external']]);
+      const queuedMaps = new Set<string>();
       let launchedAt = Date.now();
       startRequest(pendingFilters.shift()!);
       while (true) {
@@ -279,6 +334,14 @@ export function discoverSteamServers(gameExecutable: string, progress: (value: S
             }
           }
           servers = [...unique.values()];
+          // A worldwide list can hit Steam's cap before whole communities appear.
+          // Partition by maps actually advertised in the directory, including
+          // custom maps, rather than relying on population/tag combinations.
+          for (const server of servers) {
+            if (!server.map || queuedMaps.has(server.map)) continue;
+            queuedMaps.add(server.map);
+            addRequest([['map', server.map]]);
+          }
           progress({ total: servers.length, complete: servers.filter((server) => server.lastSeen > 0).length, servers });
           lastProgress = Date.now();
         }

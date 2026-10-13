@@ -1,0 +1,42 @@
+[
+  {
+    "version": "0.1.0-beta.1",
+    "channel": "beta",
+    "buildNumber": 1,
+    "builtAt": "2026-10-13T09:04:38.696Z",
+    "commit": "adb85e3658ac",
+    "dirty": true
+  },
+  {
+    "version": "0.1.0-beta.1",
+    "channel": "beta",
+    "buildNumber": 2,
+    "builtAt": "2026-10-13T09:34:49.295Z",
+    "commit": "adb85e3658ac",
+    "dirty": true
+  },
+  {
+    "version": "0.1.0-beta.1",
+    "channel": "beta",
+    "buildNumber": 3,
+    "builtAt": "2026-10-13T14:24:32.704Z",
+    "commit": "adb85e3658ac",
+    "dirty": true
+  },
+  {
+    "version": "0.1.0-beta.1",
+    "channel": "beta",
+    "buildNumber": 4,
+    "builtAt": "2026-10-13T14:32:15.448Z",
+    "commit": "adb85e3658ac",
+    "dirty": true
+  },
+  {
+    "version": "0.1.0-beta.1",
+    "channel": "beta",
+    "buildNumber": 5,
+    "builtAt": "2026-10-13T15:26:57.871Z",
+    "commit": "adb85e3658ac",
+    "dirty": true
+  }
+]

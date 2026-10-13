@@ -1,19 +1,20 @@
 {
   "name": "dz-launchpad",
-  "version": "0.1.0",
+  "version": "0.1.0-beta.1",
   "description": "A Windows desktop launcher and Workshop mod manager for DayZ",
-  "author": "DZ Launchpad",
+  "author": "z0mbi3jesus",
   "private": true,
   "type": "module",
   "main": "dist-electron/main.js",
   "scripts": {
     "dev": "npm run build:electron && concurrently -k \"vite --host 127.0.0.1\" \"wait-on http://127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .\"",
-    "build:electron": "esbuild electron/main.ts --bundle --platform=node --format=esm --external:electron --external:koffi --outdir=dist-electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.js",
+    "build:electron": "npm run build:info && esbuild electron/main.ts --bundle --platform=node --format=esm --external:electron --external:koffi --outdir=dist-electron && esbuild electron/preload.ts --bundle --platform=node --format=cjs --external:electron --outfile=dist-electron/preload.js",
     "build": "npm run typecheck && npm run test:server-browser && vite build && npm run build:electron && electron-builder --dir --config.directories.output=launcher-build",
     "start": "electron .",
     "package": "npm run typecheck && npm run test:server-browser && vite build && npm run build:electron && electron-builder --config.directories.output=launcher-build",
     "typecheck": "tsc --noEmit --pretty",
-    "test:server-browser": "esbuild electron/server-browser.ts --bundle --platform=node --format=esm --external:koffi --outfile=node_modules/.cache/dayz-launchpad-server-browser.mjs && node --test tests/server-browser.test.mjs"
+    "test:server-browser": "esbuild electron/server-browser.ts --bundle --platform=node --format=esm --external:koffi --outfile=node_modules/.cache/dayz-launchpad-server-browser.mjs && node --test tests/server-browser.test.mjs",
+    "build:info": "node scripts/build-info.mjs"
   },
   "dependencies": {
     "koffi": "^3.3.2",
@@ -37,17 +38,49 @@
   },
   "build": {
     "appId": "com.zdz.launchpad",
-    "productName": "DZ Launchpad",
+    "productName": "z0mbi3's DayZ Launcher",
     "electronDist": "node_modules/electron/dist",
     "directories": {
       "output": "launcher-build"
     },
     "files": [
       "dist",
-      "dist-electron"
+      "dist-electron",
+      "LICENSE",
+      "TERMS.md",
+      "PRIVACY.md",
+      "THIRD_PARTY_NOTICES.md",
+      "README.md"
     ],
     "win": {
       "target": "nsis"
-    }
-  }
+    },
+    "extraFiles": [
+      {
+        "from": "LICENSE",
+        "to": "legal/LICENSE"
+      },
+      {
+        "from": "TERMS.md",
+        "to": "legal/TERMS.md"
+      },
+      {
+        "from": "PRIVACY.md",
+        "to": "legal/PRIVACY.md"
+      },
+      {
+        "from": "THIRD_PARTY_NOTICES.md",
+        "to": "legal/THIRD_PARTY_NOTICES.md"
+      },
+      {
+        "from": "dist-electron/build-info.json",
+        "to": "build-info.json"
+      }
+    ],
+    "nsis": {
+      "license": "LICENSE"
+    },
+    "artifactName": "z0mbi3-DayZ-Launcher-${version}-${arch}-${target}.${ext}"
+  },
+  "license": "SEE LICENSE IN LICENSE"
 }

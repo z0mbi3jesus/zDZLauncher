@@ -1,6 +1,6 @@
 import { app, BrowserWindow, dialog, ipcMain, shell } from 'electron';
 import { execFileSync, spawn } from 'node:child_process';
-import { existsSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, statSync, mkdirSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { getLogFile, initializeLogger, log } from './logger.js';
 import { parseServerAddress, queryAddressCandidates, queryServerMods, resolveServerModIds, matchServerMods, scanServers, type DayZServer } from './server-browser.js';
@@ -28,7 +28,18 @@ interface JoinRequest {
   modIds: string[];
 }
 
+// Preserve settings and renderer storage across the product-name change.
+const launcherDataDirectory = path.join(app.getPath('appData'), 'dz-launchpad');
+mkdirSync(launcherDataDirectory, { recursive: true });
+app.setName("z0mbi3's DayZ Launcher");
+app.setPath('userData', launcherDataDirectory);
+app.setPath('sessionData', launcherDataDirectory);
+
 const DAYZ_APP_ID = '221100';
+const releaseInfo: { version: string; channel: string; buildNumber: number; builtAt: string; commit: string; dirty: boolean } = (() => {
+  try { return JSON.parse(readFileSync(path.join(import.meta.dirname, 'build-info.json'), 'utf8')); }
+  catch { return { version: app.getVersion(), channel: 'development', buildNumber: 0, builtAt: '', commit: 'unknown', dirty: true }; }
+})();
 const settingsPath = () => path.join(app.getPath('userData'), 'settings.json');
 
 function readSettings(): Settings {
@@ -129,7 +140,7 @@ function createWindow() {
     minWidth: 980,
     minHeight: 680,
     backgroundColor: '#111513',
-    title: 'DZ Launchpad',
+    title: "z0mbi3's DayZ Launcher",
     webPreferences: {
       preload: path.join(import.meta.dirname, 'preload.js'),
       contextIsolation: true,
@@ -184,7 +195,7 @@ ipcMain.handle('app:status', () => {
   const settings = readSettings();
   const executable = gameExecutable(settings);
   const { workshopPath, mods } = scanMods();
-  return { gamePath: executable, gameFound: Boolean(executable && existsSync(executable)), workshopPath, mods };
+  return { gamePath: executable, gameFound: Boolean(executable && existsSync(executable)), workshopPath, mods, release: releaseInfo };
 });
 
 ipcMain.handle('app:choose-game', async () => {
@@ -316,7 +327,7 @@ ipcMain.handle('servers:mods', async (_event, address: string) => {
   log('INFO', 'Checking server-required mods.', { address });
   try {
     const parsed = parseServerAddress(address);
-    const required = resolveServerModIds(await queryServerMods(parsed.address, true), readSettings().serverModIds?.[parsed.address]);
+    const required = resolveServerModIds(await queryServerMods(parsed.address, true, gameExecutable(readSettings()), log), readSettings().serverModIds?.[parsed.address]);
     const matched = matchServerMods(required, scanMods().mods);
     log('INFO', 'Server mods matched.', { address, required: matched.length, missing: matched.filter((mod) => !mod.installed).length });
     return matched;
@@ -329,7 +340,7 @@ ipcMain.handle('servers:mods', async (_event, address: string) => {
 ipcMain.handle('servers:set-mod-id', async (_event, request: { address: string; name: string; id: string }) => {
   const { address } = parseServerAddress(request.address);
   if (!/^[1-9]\d{0,19}$/.test(request.id)) throw new Error('Enter a numeric Workshop item ID.');
-  const required = await queryServerMods(address, true);
+  const required = await queryServerMods(address, true, gameExecutable(readSettings()), log);
   if (!required.some((mod) => mod.id === '0' && mod.name === request.name)) throw new Error('This mod no longer needs a Workshop ID. Recheck the server.');
   const settings = readSettings();
   const serverModIds = { ...settings.serverModIds, [address]: { ...settings.serverModIds?.[address], [request.name]: request.id } };
@@ -350,21 +361,27 @@ async function withModPreparation<T>(event: Electron.IpcMainInvokeEvent, work: (
 }
 
 async function prepareServerMods(event: Electron.IpcMainInvokeEvent, address: string, executable: string, signal: AbortSignal) {
-  const required = resolveServerModIds(await queryServerMods(address, true), readSettings().serverModIds?.[address]);
+  const required = resolveServerModIds(await queryServerMods(address, true, gameExecutable(readSettings()), log), readSettings().serverModIds?.[address]);
   if (signal.aborted) throw new Error('Mod preparation cancelled.');
   if (required.some((mod) => mod.id === '0')) throw new Error('Assign Workshop IDs to unresolved mods before downloading.');
   log('INFO', 'Preparing server Workshop mods.', { address, count: required.length });
   let folders = new Map<string, string>();
   if (required.length) {
     const client = workshopClient(executable);
+    let lastProgressLog = 0;
+    let lastComplete = -1;
     try {
       folders = await installWorkshopMods(required, client, (progress) => {
-        if (!signal.aborted && !event.sender.isDestroyed()) event.sender.send('workshop:progress', { address, ...progress } satisfies WorkshopProgress);
+        if (!event.sender.isDestroyed()) event.sender.send('workshop:progress', { address, ...progress } satisfies WorkshopProgress);
+        if (progress.complete !== lastComplete || Date.now() - lastProgressLog >= 30000 || progress.items.some((item) => item.status === 'failed' || item.status === 'cancelled')) {
+          log('INFO', 'Workshop preparation progress.', { address, complete: progress.complete, total: progress.total, items: progress.items.filter((item) => item.status !== 'ready') });
+          lastProgressLog = Date.now(); lastComplete = progress.complete;
+        }
       }, signal);
     } finally { client.dispose(); }
   }
   // Recheck the server after downloads, which can take a long time.
-  const current = resolveServerModIds(await queryServerMods(address, true), readSettings().serverModIds?.[address]);
+  const current = resolveServerModIds(await queryServerMods(address, true, gameExecutable(readSettings()), log), readSettings().serverModIds?.[address]);
   if (signal.aborted) throw new Error('Mod preparation cancelled.');
   if (JSON.stringify(current.map((mod) => mod.id)) !== JSON.stringify(required.map((mod) => mod.id))) throw new Error('The server changed its mod list during download. Click Join again to prepare the new loadout.');
   for (const mod of required) {
@@ -415,7 +432,7 @@ ipcMain.handle('servers:join', async (event, request: JoinRequest) => withModPre
 
 app.whenReady().then(() => {
   const logFile = initializeLogger(app.getPath('userData'));
-  log('INFO', 'DZ Launchpad starting.', { version: app.getVersion(), platform: process.platform, logFile });
+  log('INFO', "z0mbi3's DayZ Launcher starting.", { release: releaseInfo, platform: process.platform, logFile });
   process.on('uncaughtException', (error) => log('ERROR', 'Uncaught main-process exception.', error));
   process.on('unhandledRejection', (reason) => log('ERROR', 'Unhandled main-process rejection.', reason));
   createWindow();

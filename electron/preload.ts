@@ -19,13 +19,14 @@ export interface WorkshopMod {
 }
 
 export interface AppStatus {
+  release?: { version: string; channel: string; buildNumber: number; builtAt: string; commit: string; dirty: boolean };
   gamePath: string;
   gameFound: boolean;
   workshopPath: string;
   mods: WorkshopMod[];
 }
 
-export interface ServerModMatch { id: string; name: string; installed: boolean; }
+export interface ServerModMatch { id: string; name: string; installed: boolean; source?: 'dzsa'; }
 
 export type ServerScope = 'internet' | 'favorites' | 'history';
 

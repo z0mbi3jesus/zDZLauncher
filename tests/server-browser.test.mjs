@@ -1,6 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { parseDzsaMods } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 import { createSocket } from 'node:dgram';
+
+test('DZSA fallback binds metadata to the query endpoint and rejects unsafe mod lists', () => {
+  const data = { status: 0, result: { endpoint: { ip: '203.0.113.7', port: 2303 }, mods: [{ name: 'CF', steamWorkshopId: 1559212036 }] } };
+  assert.deepEqual(parseDzsaMods(data, '203.0.113.7', 2303), [{ name: 'CF', id: '1559212036' }]);
+  assert.throws(() => parseDzsaMods(data, '203.0.113.8', 2303), /matching/);
+  assert.throws(() => parseDzsaMods(data, '203.0.113.7', 2302), /matching/);
+  for (const id of [0, -1, 9007199254740992, '18446744073709551616', 'not-an-id']) {
+    assert.throws(() => parseDzsaMods({ ...data, result: { ...data.result, mods: [{ steamWorkshopId: id }] } }, '203.0.113.7', 2303), /invalid/);
+  }
+  assert.throws(() => parseDzsaMods({ ...data, result: { ...data.result, mods: [] } }, '203.0.113.7', 2303), /empty/);
+  assert.throws(() => parseDzsaMods({ ...data, result: { ...data.result, mods: [...data.result.mods, ...data.result.mods] } }, '203.0.113.7', 2303), /duplicate/);
+});
 import { generateKeyPairSync, sign } from 'node:crypto';
 import { dayZLaunchCommand, playerLaunchArgs, selectedPlayerProfile, installWorkshopMods, workshopReady, resolveServerModIds, queryServerMods, parseDayZRules, matchServerMods, parseInfo, parseDayZSignatures, parseServerAddress, parseSteamServer, queryAddressCandidates, scanServers, verifyOfficialSignature } from '../node_modules/.cache/dayz-launchpad-server-browser.mjs';
 
@@ -242,11 +255,60 @@ test('download completion callback is required before using an installed item', 
 });
 
 test('Steam download failures stop preparation before file access', async () => {
+  const snapshots = [];
   await assert.rejects(installWorkshopMods([{ id: '123', name: 'Mod' }], {
     subscribe: async () => {}, state: () => 1 | 8,
     download: () => {}, downloadResult: () => 9,
     folder: () => { throw new Error('Must not inspect failed downloads'); }, pump: () => {},
-  }, () => {}, undefined, { wait: async () => {} }), /Steam download failed/);
+  }, (snapshot) => snapshots.push(snapshot), undefined, { wait: async () => {} }), /Steam download failed/);
+  assert.equal(snapshots.at(-1).items[0].status, 'failed');
+  assert.match(snapshots.at(-1).items[0].error, /result 9/);
+});
+
+test('per-item progress reports bytes and waits for the completion callback at 100 percent', async () => {
+  let tick = 0;
+  const snapshots = [];
+  await installWorkshopMods([{ id: '123', name: 'First' }, { id: '456', name: 'Second' }], {
+    subscribe: async () => {},
+    state: (id) => id === '456' ? 5 : tick >= 2 ? 5 : 1 | 8 | 16,
+    folder: (id) => { if (id === '123') assert.ok(tick >= 3); return `folder-${id}`; },
+    download: () => {}, downloadResult: () => tick >= 3 ? 1 : undefined,
+    downloadInfo: (id) => id === '123' ? { downloaded: tick === 1 ? 50n : 100n, total: 100n } : undefined,
+    pump: () => tick++,
+  }, (snapshot) => snapshots.push(snapshot), undefined, { wait: async () => {} });
+  const halfway = snapshots.find((snapshot) => snapshot.items[0].percent === 50);
+  assert.equal(halfway.items[0].status, 'downloading');
+  assert.equal(halfway.items[0].downloadedBytes, '50');
+  assert.equal(halfway.items[0].totalBytes, '100');
+  assert.equal(halfway.items[1].status, 'ready');
+  assert.equal(halfway.complete, 1);
+  assert.ok(snapshots.some((snapshot) => snapshot.items[0].percent === 100 && snapshot.items[0].status === 'installing' && snapshot.complete === 1));
+  assert.ok(snapshots.at(-1).items.every((item) => item.status === 'ready'));
+  assert.equal(halfway.items[0].status, 'downloading', 'published snapshots must not mutate');
+});
+
+test('unknown download sizes stay indeterminate and cancellation retains per-item state', async () => {
+  const controller = new AbortController();
+  const snapshots = [];
+  await assert.rejects(installWorkshopMods([{ id: '123', name: 'Queued' }], {
+    subscribe: async () => {}, state: () => 1 | 32, download: () => {},
+    downloadInfo: () => ({ downloaded: 0n, total: 0n }), downloadResult: () => undefined,
+    folder: () => undefined, pump: () => {},
+  }, (snapshot) => snapshots.push(snapshot), controller.signal, { wait: async () => { controller.abort(); } }), /cancelled/);
+  assert.equal(snapshots.at(-2).items[0].status, 'queued');
+  assert.equal(snapshots.at(-2).items[0].percent, null);
+  assert.equal(snapshots.at(-1).items[0].status, 'cancelled');
+});
+
+test('already installed items publish a completed per-item snapshot without downloading', async () => {
+  const snapshots = [];
+  await installWorkshopMods([{ id: '123', name: 'Installed' }], {
+    subscribe: async () => { throw new Error('Must not subscribe'); }, state: () => 5,
+    download: () => { throw new Error('Must not download'); }, folder: () => 'installed', pump: () => {},
+  }, (snapshot) => snapshots.push(snapshot));
+  assert.equal(snapshots.at(-1).stage, 'ready');
+  assert.equal(snapshots.at(-1).complete, 1);
+  assert.equal(snapshots.at(-1).items[0].percent, 100);
 });
 
 test('DayZ launch uses existing player profiles and refuses ambiguous or missing selections', () => {
@@ -267,4 +329,22 @@ test('BattlEye bootstrap receives the game executable and separate profile/serve
   assert.ok(launch.executable.endsWith('DayZ_BE.exe'));
   assert.deepEqual(launch.args, ['-exe', 'DayZ_x64.exe', ...args]);
   assert.deepEqual(args, ['-name=Survivor One', '-connect=127.0.0.1', '-port=2302', '-mod=one;two']);
+});
+
+test('mod query retransmits a dropped challenge response on the same socket', async () => {
+  const socket = createSocket('udp4');
+  await new Promise((resolve) => socket.bind(0, '127.0.0.1', resolve));
+  let challengePort, replies = 0;
+  socket.on('message', (request, remote) => {
+    if (request.readInt32LE(5) === -1) {
+      challengePort = remote.port;
+      socket.send(Buffer.from([255,255,255,255,65,42,0,0,0]), remote.port, remote.address);
+    } else if (remote.port === challengePort && ++replies === 2) {
+      socket.send(modRules([['1234', 'Recovered']]), remote.port, remote.address);
+    }
+  });
+  try {
+    assert.deepEqual(await queryServerMods(`127.0.0.1:${socket.address().port}`), [{ id: '1234', name: 'Recovered' }]);
+    assert.equal(replies, 2);
+  } finally { socket.close(); }
 });

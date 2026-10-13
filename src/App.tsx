@@ -86,7 +86,7 @@ function App() {
       && (!hideEmpty || server.players > 0)
       && (!hideLocked || !server.password)
       && (!secureOnly || server.vac)
-      && (maxPing >= 2500 || (server.ping !== null && server.ping <= maxPing));
+      && (maxPing >= 2500 || server.ping === null || server.ping <= maxPing);
   }).sort((left, right) => {
     if (serverSort === 'ping') return (left.ping ?? Number.MAX_SAFE_INTEGER) - (right.ping ?? Number.MAX_SAFE_INTEGER);
     if (serverSort === 'name') return left.name.localeCompare(right.name);
@@ -275,7 +275,6 @@ function App() {
     finally {
       joining.current = false;
       setModJobAddress('');
-      setWorkshopProgress(null);
       setModCheckVersion((value) => value + 1);
       void refresh();
     }
@@ -303,7 +302,6 @@ function App() {
     } finally {
       joining.current = false;
       setModJobAddress('');
-      setWorkshopProgress(null);
       setModCheckVersion((value) => value + 1);
       void refresh();
     }
@@ -379,6 +377,7 @@ function App() {
     <main className="app-shell">
       <aside className="rail">
         <div className="brand-mark"><span> DZ </span></div>
+        <div className="brand-name">z0mbi3's DayZ Launcher</div>
         <div className="rail-label">FIELD KIT</div>
         <nav aria-label="Main navigation">
           {navItems.map(({ id, label, icon: Icon }) => (
@@ -395,12 +394,12 @@ function App() {
         <button className={`nav-item ${page === 'settings' ? 'active' : ''}`} onClick={() => setPage('settings')} title="Settings">
           <Settings2 size={19} strokeWidth={1.8} /><span>Settings</span>
         </button>
-        <div className="rail-version">DZ LAUNCHPAD <span>0.1.0</span></div>
+        <div className="rail-version">{status.release?.channel.toUpperCase() ?? 'BETA'} <span>{status.release?.version ?? 'Loading...'}</span><div>BUILD {status.release?.buildNumber ?? '—'}</div></div>
       </aside>
 
       <section className="workspace">
         <header className="topbar">
-          <div className="breadcrumbs"><span>DAYZ</span><i>/</i><strong>{page === 'launch' ? 'LAUNCHPAD' : page === 'mods' ? 'MOD LIBRARY' : page === 'servers' ? 'SERVER BROWSER' : page.toUpperCase()}</strong></div>
+          <div className="breadcrumbs"><span>DAYZ · {status.release?.channel.toUpperCase() ?? 'BETA'}</span><i>/</i><strong>{page === 'launch' ? 'LAUNCHPAD' : page === 'mods' ? 'MOD LIBRARY' : page === 'servers' ? 'SERVER BROWSER' : page.toUpperCase()}</strong></div>
           <div className="top-actions">
             <button className="icon-button" title="Open Workshop" onClick={() => void window.dayz.openWorkshop()}><Download size={17} /></button>
             <button className="icon-button" title="Refresh mod library" onClick={() => void refresh()}><RefreshCw size={16} className={working ? 'spin' : ''} /></button>
@@ -483,7 +482,7 @@ function App() {
             <label className="server-check"><input type="checkbox" checked={hideEmpty} onChange={(event) => setHideEmpty(event.target.checked)} /><span />Hide empty</label>
             <label className="server-check"><input type="checkbox" checked={hideLocked} onChange={(event) => setHideLocked(event.target.checked)} /><span />Hide locked</label>
             <label className="server-check"><input type="checkbox" checked={secureOnly} onChange={(event) => setSecureOnly(event.target.checked)} /><span />VAC secure</label>
-            <label className="ping-filter"><Signal size={14} /><span>MAX PING <strong>{maxPing >= 2500 ? 'ANY' : `${maxPing} ms`}</strong></span><input type="range" min="50" max="2500" step="50" value={maxPing} onChange={(event) => setMaxPing(Number(event.target.value))} /></label>
+            <label className="ping-filter" title="Limits measured ping. Servers whose ping is unknown remain visible."><Signal size={14} /><span>MAX PING <strong>{maxPing >= 2500 ? 'ANY' : `${maxPing} ms`}</strong></span><input type="range" min="50" max="2500" step="50" value={maxPing} onChange={(event) => setMaxPing(Number(event.target.value))} /></label>
             <label className="sort-filter"><Filter size={13} /><select aria-label="Sort servers" value={serverSort} onChange={(event) => setServerSort(event.target.value as typeof serverSort)}><option value="players">Players</option><option value="ping">Ping</option><option value="name">Name</option><option value="map">Map</option></select></label>
           </div>
 
@@ -517,10 +516,18 @@ function App() {
                   <div className="detail-facts"><div><span>SERVER TYPE</span><strong>{selectedServer.category === 'official' ? 'BOHEMIA VERIFIED' : selectedServer.category === 'community' ? 'COMMUNITY' : 'UNVERIFIED'}</strong></div><div><span>MAP</span><strong>{selectedServer.map || 'Unknown'}</strong></div><div><span>GAME PORT</span><strong>{selectedServer.gamePort}</strong></div><div><span>VERSION</span><strong>{selectedServer.version || 'Unknown'}</strong></div><div><span>ANTI-CHEAT</span><strong className={selectedServer.vac ? 'fact-good' : ''}>{selectedServer.vac ? 'VAC SECURE' : 'NOT ADVERTISED'}</strong></div><div><span>PASSWORD</span><strong>{selectedServer.password ? 'REQUIRED' : 'NONE'}</strong></div><div><span>QUERY PING</span><strong>{selectedServer.ping === null ? 'NOT MEASURED' : selectedServer.ping + ' MS'}</strong></div></div>
                   {selectedServer.tags.length > 0 && <div className="server-tags">{selectedServer.tags.slice(0, 8).map((tag) => <span key={tag}>{tag}</span>)}</div>}
                   <h3 className="server-mod-heading">SERVER MODS</h3>
-                  <div className="join-mod-note" role="status"><Gamepad2 size={15} /><span>{serverModsLoading ? 'Checking required mods...' : serverModsError || (serverModList.length ? `${serverModList.filter((mod) => mod.installed).length}/${serverModList.length} required mods installed. Server loadout is applied automatically.` : 'No mods required. Joining with a vanilla loadout.')}</span></div>
-                  <div className="server-required-mods">{serverModList.map((mod, index) => <div key={`${mod.id}-${index}`}><span>{mod.id === '0' ? 'Workshop ID unavailable: ' : mod.installed ? 'Installed: ' : 'Missing: '}{mod.name}{mod.id !== '0' && <small className="server-mod-id">Workshop {mod.id}</small>}</span><button className="text-button" onClick={() => mod.id === '0' ? void assignServerModId(mod, selectedServer.address) : void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.id === '0' ? 'SET ID' : mod.installed ? 'WORKSHOP' : 'GET MOD'}</button></div>)}</div>
+                  <div className="join-mod-note" role="status"><Gamepad2 size={15} /><span>{serverModsLoading ? 'Checking required mods...' : serverModsError || (serverModList.length ? `${serverModList.filter((mod) => { const item = workshopProgress?.address === selectedServer.address ? workshopProgress.items.find((item) => item.id === mod.id) : undefined; return item ? item.status === 'ready' : mod.installed; }).length}/${serverModList.length} required mods installed. Server loadout is applied automatically.` : 'No mods required. Joining with a vanilla loadout.')}</span></div>
+                  <div className="server-required-mods">{serverModList.map((mod, index) => {
+                    const item = workshopProgress?.address === selectedServer.address ? workshopProgress.items.find((item) => item.id === mod.id) : undefined;
+                    const installed = item ? item.status === 'ready' : mod.installed;
+                    const percent = item?.percent ?? (installed ? 100 : null);
+                    const label = mod.id === '0' ? 'Workshop ID unavailable' : item ? ({ queued: 'Queued in Steam', subscribing: 'Subscribing', downloading: 'Downloading', installing: 'Installing / waiting for Steam', verifying: 'Verifying installation', ready: 'Installed', failed: 'Failed', cancelled: 'Stopped waiting' })[item.status] : installed ? 'Installed' : 'Not installed';
+                    const formatBytes = (value: string) => { const bytes = Number(value); return bytes >= 1073741824 ? `${(bytes / 1073741824).toFixed(2)} GB` : `${(bytes / 1048576).toFixed(1)} MB`; };
+                    return <div key={`${mod.id}-${index}`} className="server-mod-row"><div className="server-mod-info"><strong>{mod.name}</strong><small className="server-mod-id">{mod.id !== '0' && `Workshop ${mod.id}`}</small><div className={`server-mod-status ${item?.status ?? ''}`}><span>{label}</span><span>{percent === null ? '—' : `${percent.toFixed(0)}%`}</span></div><progress aria-label={`${mod.name} download progress`} max={100} value={percent ?? (item?.status === 'downloading' || item?.status === 'installing' || item?.status === 'verifying' || item?.status === 'subscribing' ? undefined : 0)} /><small className="server-mod-bytes">{item?.totalBytes && item.totalBytes !== '0' && `${formatBytes(item.downloadedBytes ?? '0')} / ${formatBytes(item.totalBytes)}`}{item && item.idleSeconds >= 30 && ['downloading', 'installing', 'verifying'].includes(item.status) && ` · No reported progress for ${item.idleSeconds}s`}</small>{item?.error && <small className="server-mod-error">{item.error}</small>}</div><button className="text-button" onClick={() => mod.id === '0' ? void assignServerModId(mod, selectedServer.address) : void window.dayz.openWorkshop(`https://steamcommunity.com/sharedfiles/filedetails/?id=${mod.id}`)}>{mod.id === '0' ? 'SET ID' : installed ? 'WORKSHOP' : 'GET MOD'}</button></div>;
+                  })}</div>
                   <button className="text-button" disabled={serverModsLoading} onClick={() => setModCheckVersion((value) => value + 1)}>RECHECK MODS</button>
                   <button className="text-button" disabled={!status.gameFound || Boolean(modJobAddress) || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => mod.id === '0')} onClick={() => void getAllServerMods(selectedServer)}>GET ALL MODS</button>
+                  {serverModList.some((mod) => mod.source === 'dzsa') && <div className="join-mod-note" role="status"><span>Mod list supplied by DZSA. It may be cached; use Recheck Mods if the server recently changed its mods.</span></div>}
                   {modJobAddress && <div className="join-mod-note" role="status"><span>{workshopProgress ? `${workshopProgress.complete}/${workshopProgress.total} mods ready. ${workshopProgress.stage === 'subscribing' ? 'Subscribing to' : 'Waiting for Steam to install'} ${workshopProgress.name}` : 'Preparing server mods...'}{modJobAddress !== selectedServer.address && ' (for the previously selected server)'}</span><button className="text-button" onClick={() => void window.dayz.cancelModPreparation()}>CANCEL</button></div>}
                   <button className="join-server-button" onClick={() => void joinServer(selectedServer)} disabled={!status.gameFound || Boolean(modJobAddress) || serverModsLoading || Boolean(serverModsError) || serverModList.some((mod) => mod.id === '0')}><Play size={16} fill="currentColor" /> JOIN SERVER <span>↗</span></button>
                   {!status.gameFound && <small className="join-blocked">Set the DayZ game path in Settings to enable joining.</small>}
@@ -555,7 +562,8 @@ function App() {
         </div>}
 
         {page === 'settings' && <div className="page-content settings-page">
-          <div className="page-title-row"><div><div className="eyebrow">LOCAL CONFIGURATION</div><h1>Settings<span>.</span></h1><p>Connect DZ Launchpad to your local DayZ install.</p></div></div>
+          <div className="page-title-row"><div><div className="eyebrow">LOCAL CONFIGURATION</div><h1>Settings<span>.</span></h1><p>Connect z0mbi3's DayZ Launcher to your local DayZ install.</p></div></div>
+          <div className="settings-section"><div className="settings-heading"><div><strong>Release information</strong><span>{status.release?.version ?? 'Loading...'} · {status.release?.channel.toUpperCase() ?? 'BETA'} · BUILD {status.release?.buildNumber ?? '—'}</span></div></div><p className="setting-note">Built: {status.release?.builtAt || 'Development'} · Source: {status.release?.commit ?? 'unknown'}{status.release?.dirty ? ' (modified source)' : ''}. Include this version and build number when reporting an issue.</p></div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Users size={18} /></div><div><strong>Steam player and DayZ profile</strong><span>Your signed-in Steam account and existing local DayZ settings</span></div></div>
             <p>{playerStatus?.player ? `${playerStatus.player.name} — Steam ID ${playerStatus.player.id}` : playerStatus?.error || 'Checking Steam...'}</p>
             <label className="setting-note">DayZ player profile <select value={playerStatus?.profile?.name ?? ''} onChange={(event) => { const name = event.target.value; if (name) void window.dayz.selectPlayerProfile(name).then(refreshPlayer).catch((error) => setNotice(error.message)); }} disabled={!playerStatus?.player || !playerStatus.profiles.length}><option value="">{playerStatus?.profiles.length ? 'Choose existing profile' : 'DayZ default (no existing profile detected)'}</option>{playerStatus?.profiles.map((item) => <option key={item.file} value={item.name}>{item.name}</option>)}</select></label>
@@ -564,7 +572,7 @@ function App() {
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Settings2 size={18} /></div><div><strong>Game installation</strong><span>DayZ_x64.exe location</span></div></div><div className="path-box"><div className={`path-state ${status.gameFound ? 'good' : ''}`} /><span title={status.gamePath}>{status.gamePath || 'No DayZ installation selected'}</span><button onClick={async () => { try { await window.dayz.chooseGame(); await refresh(); } catch (error) { setNotice(error instanceof Error ? error.message : 'Invalid game path.'); } }}>BROWSE <FolderOpen size={14} /></button></div><p className="setting-note">The launcher searches standard Steam library folders automatically. You can select your DayZ directory or its executable.</p></div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Download size={18} /></div><div><strong>Workshop library</strong><span>Steam-managed local content</span></div></div><div className="path-box"><div className={`path-state ${status.workshopPath ? 'good' : ''}`} /><span title={status.workshopPath}>{status.workshopPath || 'Workshop content folder not detected'}</span><button disabled={!status.workshopPath} onClick={() => void window.dayz.openFolder(status.workshopPath)}>OPEN <FolderOpen size={14} /></button></div><p className="setting-note">Subscriptions and downloads are managed by Steam. Subscribe to DayZ items in the Workshop, then refresh the library here.</p></div>
           <div className="settings-section"><div className="settings-heading"><div className="settings-icon"><Wrench size={18} /></div><div><strong>Runtime diagnostics</strong><span>Startup, server discovery, and launch events</span></div></div><div className="path-box"><div className="path-state good" /><span title={runtimeLogPath}>{runtimeLogPath || 'Log path is being initialized'}</span><button disabled={!runtimeLogPath} onClick={() => void window.dayz.openLog()}>OPEN LOG <FolderOpen size={14} /></button></div><p className="setting-note">The active log is capped at 2 MB; the previous log is kept as one backup. Server passwords are never written to the log.</p></div>
-          <div className="settings-callout"><ShieldCheck size={17} /><span>Steam credentials stay with Steam. DZ Launchpad only reads downloaded Workshop folders and does not sign in to your account.</span></div>
+          <div className="settings-callout"><ShieldCheck size={17} /><span>Steam credentials stay with Steam. The launcher uses the running Steam client for identity, subscriptions, and downloads; it never asks for your Steam password.</span></div>
         </div>}
 
         <footer className="footer-bar"><span><span className="footer-dot" /> SURVIVAL SYSTEMS ONLINE</span><span>DAYZ STANDALONE <i>·</i> WINDOWS</span></footer>
